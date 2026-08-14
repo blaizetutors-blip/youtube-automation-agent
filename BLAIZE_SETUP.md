@@ -2,7 +2,19 @@
 
 The YouTube channel branding and channel defaults are already configured. This guide finishes the local automation safely.
 
-## 1. Create the local configuration
+## Recommended Windows pilot
+
+Install **Node.js 22 LTS** and Git, then open PowerShell:
+
+```powershell
+git clone https://github.com/blaizetutors-blip/youtube-automation-agent.git
+cd youtube-automation-agent
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-blaize-windows.ps1
+```
+
+The setup script generates the local dashboard key, asks for the Gemini key with hidden input, imports the downloaded Google OAuth Desktop JSON, installs Chromium/FFmpeg dependencies, runs the tests, and starts YouTube authorization.
+
+## 1. Create the local configuration manually
 
 ```bash
 cp .env.blaize.example .env
@@ -20,6 +32,8 @@ Do not paste that value, an AI-provider key, a Google client secret or an OAuth 
 
 Add one provider key to `.env`. Gemini can cover text, images and narration with one key; OpenAI can also cover all three. Other supported text providers need a separate media/TTS provider for a complete video.
 
+The Gemini free tier currently supports the text and TTS portions used by this pilot, but generated image availability depends on the model and billing tier. If image generation is unavailable, the video uses the Blaize Tutors heritage slide design instead of generic placeholder branding. Paid Gemini image generation is optional for the private pilot.
+
 Blaize Biology mode refuses to fall back to the repository's generic template scripts when no AI provider is available.
 
 ## 3. Connect YouTube
@@ -27,11 +41,21 @@ Blaize Biology mode refuses to fall back to the repository's generic template sc
 In Google Cloud Console:
 
 1. Create or select a project for Blaize Tutors.
-2. Enable **YouTube Data API v3**.
-3. Configure the OAuth consent screen.
+2. Enable **YouTube Data API v3** and **YouTube Analytics API**.
+3. Configure Google Auth Platform with:
+   - App name: `Blaize Tutors Biology Automation`
+   - Audience: External / Testing
+   - Test user: `blaizetutors@gmail.com`
+   - Support and developer email: `blaizetutors@gmail.com`
 4. Create an OAuth 2.0 client of type **Desktop app**.
-5. Download the client JSON and use the repository setup flow to save it as `config/credentials.json`.
-6. Run `npm run credentials:setup` and complete consent in your browser.
+5. Download the client JSON.
+6. Import it without exposing the secret:
+
+   ```powershell
+   npm run credentials:import -- "C:\path\to\client_secret.json"
+   ```
+
+7. Run `npm run credentials:setup` and complete consent in your browser.
 
 The tailored build requests only upload, read-only YouTube and read-only Analytics scopes. Credential and token files are ignored by Git and saved with owner-only file permissions on supported systems.
 

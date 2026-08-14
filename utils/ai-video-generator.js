@@ -29,7 +29,8 @@ class AIVideoGenerator {
       this.logger.warn('Replicate API key not found - advanced video generation unavailable');
     }
 
-    // Gemini media generation (images + native TTS) — free-tier alternative to OpenAI
+    // Gemini media generation (images + native TTS). Availability depends on the
+    // selected Gemini model and the project's billing tier.
     const geminiKey = credentials.gemini?.apiKey || process.env.GEMINI_API_KEY;
     if (geminiKey) {
       try {
@@ -133,10 +134,14 @@ class AIVideoGenerator {
   async generateGeminiTTS(text, outputPath) {
     const model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
     const voiceName = process.env.GEMINI_TTS_VOICE || 'Kore';
+    const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
+    const narrationText = biologyMode
+      ? `Read the following Biology lesson in a clear, warm, neutral African-British academic voice. Use calm authority, natural pacing, precise scientific pronunciation and brief pauses around definitions. Do not speak these directions. Lesson:\n\n${text}`
+      : text;
 
     const response = await this.gemini.models.generateContent({
       model,
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts: [{ text: narrationText }] }],
       config: {
         responseModalities: ['AUDIO'],
         speechConfig: {
@@ -426,19 +431,47 @@ class AIVideoGenerator {
   }
 
   createSlideshowHTML(script, visualAssets) {
+    const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
+    const brandLabel = biologyMode ? 'Blaize Tutors · The Biology Series' : 'YouTube Automation';
+    const closingTitle = biologyMode ? 'Biology, explained.' : 'Subscribe for More';
+    const closingText = biologyMode
+      ? 'From first principles to exam marks.'
+      : 'New lessons coming soon';
+
     return `
 <!DOCTYPE html>
 <html>
 <head>
     <style>
+        :root {
+            --deep-green: ${biologyMode ? '#062C2A' : '#667eea'};
+            --deep-green-2: ${biologyMode ? '#021A19' : '#764ba2'};
+            --turquoise: ${biologyMode ? '#35D6CF' : '#FFFFFF'};
+            --flame-orange: ${biologyMode ? '#F36B21' : '#FFFFFF'};
+            --flame-yellow: ${biologyMode ? '#FFD54A' : '#FFFFFF'};
+            --paper: ${biologyMode ? '#F4E8CC' : '#FFFFFF'};
+        }
+
         body {
             margin: 0;
             padding: 0;
             width: 1920px;
             height: 1080px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            font-family: 'Arial', sans-serif;
+            background:
+                radial-gradient(circle at 82% 18%, rgba(53,214,207,0.16), transparent 26%),
+                linear-gradient(135deg, var(--deep-green) 0%, var(--deep-green-2) 100%);
+            font-family: Georgia, 'Times New Roman', serif;
             overflow: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: absolute;
+            inset: 34px;
+            border: 2px solid rgba(244,232,204,0.34);
+            box-shadow: inset 0 0 0 1px rgba(53,214,207,0.18);
+            pointer-events: none;
+            z-index: 4;
         }
         
         .slide {
@@ -458,26 +491,49 @@ class AIVideoGenerator {
         
         .content {
             text-align: center;
-            color: white;
+            color: var(--paper);
             max-width: 80%;
+            padding: 72px 96px;
+            background: rgba(2,26,25,0.48);
+            border-top: 3px solid var(--turquoise);
+            border-bottom: 1px solid rgba(244,232,204,0.4);
+            box-shadow: 0 24px 70px rgba(0,0,0,0.28);
         }
         
         h1 {
             font-size: 72px;
             margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            text-shadow: 0 4px 18px rgba(0,0,0,0.55);
+            letter-spacing: 0.01em;
         }
         
         h2 {
             font-size: 48px;
             margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            color: var(--flame-yellow);
+            text-shadow: 0 4px 18px rgba(0,0,0,0.55);
         }
         
         p {
             font-size: 36px;
             line-height: 1.4;
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+            font-family: Arial, sans-serif;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.55);
+        }
+
+        .series-label {
+            margin-bottom: 26px;
+            color: var(--turquoise);
+            font: 700 25px/1.2 Arial, sans-serif;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+        }
+
+        .accent-rule {
+            width: 180px;
+            height: 7px;
+            margin: 30px auto;
+            background: linear-gradient(90deg, var(--flame-orange), var(--flame-yellow));
         }
         
         .background-image {
@@ -503,7 +559,7 @@ class AIVideoGenerator {
         
         .particle {
             position: absolute;
-            background: rgba(255,255,255,0.8);
+            background: rgba(53,214,207,0.72);
             border-radius: 50%;
             animation: float 6s ease-in-out infinite;
         }
@@ -521,8 +577,10 @@ class AIVideoGenerator {
     <div class="slide active">
         ${visualAssets[0] ? `<img class="background-image" src="${visualAssets[0]}" />` : ''}
         <div class="content">
+            <div class="series-label">${brandLabel}</div>
             <h1>${script.title}</h1>
-            <p>Ethereal Dreamscript</p>
+            <div class="accent-rule"></div>
+            <p>Biology, explained. From first principles to exam marks.</p>
         </div>
     </div>
     
@@ -531,8 +589,10 @@ class AIVideoGenerator {
     <!-- Subscribe Slide -->
     <div class="slide">
         <div class="content">
-            <h2>✨ Subscribe for More Stories ✨</h2>
-            <p>New content daily at 2:00 PM</p>
+            <div class="series-label">Blaize Tutors</div>
+            <h2>${closingTitle}</h2>
+            <div class="accent-rule"></div>
+            <p>${closingText}</p>
         </div>
     </div>
     

@@ -431,7 +431,7 @@ class ProductionManagementAgent {
     // Subscribe reminder
     elements.push({
       type: 'subscribe_reminder',
-      content: 'Subscribe for More!',
+      content: 'Master Biology with Blaize Tutors',
       duration: 3,
       style: 'call_to_action',
       animation: 'bounce'

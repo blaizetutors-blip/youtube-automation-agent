@@ -114,7 +114,7 @@ class ModernAuth {
                 <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
                   <h1 style="color: #4CAF50;">🎉 Authentication Successful!</h1>
                   <p>Your YouTube Automation Agent has been authorized!</p>
-                  <p><strong>"Ethereal Dreamscript"</strong> is ready for automation.</p>
+                  <p><strong>Blaize Tutors Biology</strong> is ready for private pilot uploads.</p>
                   <p>You can close this window and return to the terminal.</p>
                 </body>
               </html>
@@ -204,11 +204,11 @@ async function runAuth() {
     
     if (success) {
       console.log(chalk.green.bold('\n🎉 Authentication Complete!'));
-      console.log(chalk.cyan('Your "Ethereal Dreamscript" YouTube automation is ready!'));
+      console.log(chalk.cyan('Blaize Tutors Biology automation is ready for private pilots.'));
       console.log(chalk.yellow('\n📋 Next Steps:'));
       console.log(chalk.white('1. Run: npm start'));
       console.log(chalk.white('2. Visit: http://localhost:3456'));
-      console.log(chalk.white('3. Your first video will be generated within 24 hours!'));
+      console.log(chalk.white('3. Generate and review the first private pilot before uploading.'));
     } else {
       console.log(chalk.red('\n❌ Authentication test failed.'));
     }
