@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
 const { Logger } = require('../utils/logger');
+const { requiresHumanApproval } = require('../config/blaize-biology');
 
 class PublishingSchedulingAgent {
   constructor(db, credentials) {
@@ -55,10 +56,11 @@ class PublishingSchedulingAgent {
         productionId: productionData.id,
         title: productionData.script.title,
         publishTime: productionData.scheduledPublishTime,
-        status: 'scheduled',
+        status: requiresHumanApproval() ? 'awaiting_review' : 'scheduled',
         priority: productionData.priority,
         metadata: {
           seo: productionData.seo,
+          review: productionData.review,
           thumbnail: productionData.assets.thumbnail,
           video: productionData.assets.finalVideo,
           captions: productionData.assets.captions
@@ -71,7 +73,11 @@ class PublishingSchedulingAgent {
       
       await this.db.saveScheduleEntry(scheduleEntry);
       
-      this.logger.info(`Content scheduled for: ${scheduleEntry.publishTime}`);
+      if (scheduleEntry.status === 'awaiting_review') {
+        this.logger.info(`Content is awaiting human review: ${productionData.id}`);
+      } else {
+        this.logger.info(`Content scheduled for: ${scheduleEntry.publishTime}`);
+      }
       return scheduleEntry;
     } catch (error) {
       this.logger.error('Failed to schedule content:', error);
@@ -90,12 +96,21 @@ class PublishingSchedulingAgent {
       if (!scheduleEntry) {
         throw new Error(`Content not found in queue: ${contentId}`);
       }
+
+      if (scheduleEntry.status === 'awaiting_review') {
+        throw new Error('Content is awaiting human approval and cannot be uploaded');
+      }
+
+      if (scheduleEntry.status !== 'scheduled') {
+        throw new Error(`Content is not ready to upload (status: ${scheduleEntry.status})`);
+      }
       
       // Upload video to YouTube
       const uploadResult = await this.uploadToYouTube(scheduleEntry);
       
       // Update database
-      scheduleEntry.status = 'published';
+      const publicScheduling = String(process.env.AUTO_PUBLIC_SCHEDULING || '').toLowerCase() === 'true';
+      scheduleEntry.status = publicScheduling ? 'published' : 'uploaded_private';
       scheduleEntry.publishedAt = new Date().toISOString();
       scheduleEntry.youtubeId = uploadResult.id;
       scheduleEntry.youtubeUrl = `https://www.youtube.com/watch?v=${uploadResult.id}`;
@@ -105,7 +120,8 @@ class PublishingSchedulingAgent {
       // Remove from queue
       this.publishQueue = this.publishQueue.filter(entry => entry.productionId !== scheduleEntry.productionId);
       
-      this.logger.success(`Content published: ${scheduleEntry.youtubeUrl}`);
+      const action = publicScheduling ? 'published/scheduled publicly' : 'uploaded privately';
+      this.logger.success(`Content ${action}: ${scheduleEntry.youtubeUrl}`);
       return scheduleEntry;
     } catch (error) {
       this.logger.error('Failed to publish content:', error);
@@ -117,6 +133,7 @@ class PublishingSchedulingAgent {
     const { metadata } = scheduleEntry;
     
     // Prepare video metadata
+    const privacyStatus = process.env.DEFAULT_PRIVACY_STATUS || 'private';
     const videoMetadata = {
       snippet: {
         title: metadata.seo.title,
@@ -127,11 +144,17 @@ class PublishingSchedulingAgent {
         defaultAudioLanguage: metadata.seo.metadata.language
       },
       status: {
-        privacyStatus: process.env.DEFAULT_PRIVACY_STATUS || 'private',
-        publishAt: scheduleEntry.publishTime,
+        privacyStatus,
         selfDeclaredMadeForKids: false
       }
     };
+
+    // A private pilot upload must remain private. Adding publishAt would make
+    // YouTube release it publicly later even though privacyStatus is "private".
+    if (String(process.env.AUTO_PUBLIC_SCHEDULING || '').toLowerCase() === 'true') {
+      videoMetadata.status.privacyStatus = 'private';
+      videoMetadata.status.publishAt = scheduleEntry.publishTime;
+    }
     
     // Upload video file
     const videoUpload = await this.youtube.videos.insert({
@@ -233,7 +256,7 @@ class PublishingSchedulingAgent {
     for (const entry of readyToPublish) {
       try {
         await this.publishContent(entry.productionId);
-        this.logger.info(`Auto-published: ${entry.title}`);
+        this.logger.info(`Upload queue processed: ${entry.title}`);
       } catch (error) {
         this.logger.error(`Failed to auto-publish ${entry.title}:`, error);
         // Mark as failed but don't stop processing other items
@@ -244,6 +267,49 @@ class PublishingSchedulingAgent {
     }
     
     return readyToPublish.length;
+  }
+
+  getReview(contentId) {
+    const entry = this.publishQueue.find(item =>
+      item.productionId === contentId || item.id === contentId
+    );
+    if (!entry) {
+      throw new Error(`Content not found in review queue: ${contentId}`);
+    }
+    return {
+      productionId: entry.productionId,
+      title: entry.title,
+      status: entry.status,
+      publishTime: entry.publishTime,
+      review: entry.metadata?.review || null
+    };
+  }
+
+  async approveContent(contentId) {
+    const entry = this.publishQueue.find(item =>
+      item.productionId === contentId || item.id === contentId
+    );
+    if (!entry) {
+      throw new Error(`Content not found in review queue: ${contentId}`);
+    }
+    if (entry.status !== 'awaiting_review') {
+      throw new Error(`Content is not awaiting review (status: ${entry.status})`);
+    }
+
+    const review = entry.metadata?.review || {};
+    entry.metadata.review = {
+      ...review,
+      approved: true,
+      approvedAt: new Date().toISOString(),
+      approvedBy: 'channel_owner'
+    };
+    entry.status = 'scheduled';
+    if (String(process.env.AUTO_PUBLIC_SCHEDULING || '').toLowerCase() !== 'true') {
+      entry.publishTime = new Date().toISOString();
+    }
+    await this.db.updateScheduleEntry(entry);
+    this.logger.success(`Human approval recorded for: ${entry.title}`);
+    return this.getReview(contentId);
   }
 
   async getUpcomingSchedule(days = 7) {

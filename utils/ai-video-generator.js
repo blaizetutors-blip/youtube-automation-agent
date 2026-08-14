@@ -720,7 +720,10 @@ class AIVideoGenerator {
         return await this.simulateThumbnailGeneration(script, style);
       }
 
-      const prompt = `YouTube thumbnail for "${script.title}", ${style} style, eye-catching, high contrast text, professional design, clickable, engaging`;
+      const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
+      const prompt = biologyMode
+        ? `Create a 16:9 YouTube thumbnail background for the Biology lesson "${script.title}". Use an accurate subject-specific visual, deep green-black, turquoise linework, warm academic-paper tones and restrained torch-flame orange/yellow accents. Heritage academic mood, high contrast, clear focal point, generous negative space for a short title. Do not draw a logo. Do not use generic DNA, microscopes or cells unless they are scientifically relevant to this exact topic. No small text, no fake labels, no sensational faces, no visual clutter.`
+        : `YouTube thumbnail for "${script.title}", ${style} style, eye-catching, high contrast text, professional design, clickable, engaging`;
       const thumbnailPath = path.join(__dirname, '..', 'uploads', 'thumbnails', `thumbnail_${Date.now()}.png`);
 
       await this.generateImage(prompt, thumbnailPath);

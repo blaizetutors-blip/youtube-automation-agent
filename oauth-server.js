@@ -84,7 +84,8 @@ class OAuthServer {
       youtube: tokens
     };
     
-    fs.writeFileSync(tokensPath, JSON.stringify(tokenData, null, 2));
+    fs.writeFileSync(tokensPath, JSON.stringify(tokenData, null, 2), { mode: 0o600 });
+    fs.chmodSync(tokensPath, 0o600);
     console.log(chalk.green('✅ Tokens saved successfully!'));
   }
 
@@ -122,7 +123,6 @@ class OAuthServer {
 
     const scopes = [
       'https://www.googleapis.com/auth/youtube.upload',
-      'https://www.googleapis.com/auth/youtube',
       'https://www.googleapis.com/auth/youtube.readonly',
       'https://www.googleapis.com/auth/yt-analytics.readonly'
     ];

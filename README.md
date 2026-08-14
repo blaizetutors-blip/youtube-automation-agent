@@ -127,6 +127,37 @@ npm start
 
 Dashboard runs at `http://localhost:3456`.
 
+### Blaize Tutors Biology profile
+
+This working copy includes a syllabus-led profile for **Blaize Tutors**. It keeps the original logo, applies the heritage-academic palette to generated thumbnails, disables generic template scripts, and holds every completed lesson for human Biology review before upload.
+
+```bash
+cp .env.blaize.example .env
+# Add one AI-provider key and a long random API_KEY to .env.
+npm install
+npm run credentials:setup
+npm start
+```
+
+Safety defaults:
+
+- topics come from a secondary Biology curriculum map rather than general trending videos;
+- scripts must include precise definitions, a misconception check and an exam-style application check;
+- an automated second-pass review flags claims, curriculum gaps and practical-safety issues;
+- `REQUIRE_HUMAN_APPROVAL=true` keeps each finished video in `awaiting_review`;
+- approval moves the item to a **private upload** queue; it does not make the video public;
+- `AUTO_PUBLIC_SCHEDULING=false` prevents `publishAt` from silently turning a private upload into a public scheduled release.
+
+```bash
+# Inspect the review report for a generated production
+curl -H "x-api-key: $API_KEY" http://localhost:3456/review/PRODUCTION_ID
+
+# After checking the script, visuals, thumbnail and sources
+curl -X POST -H "x-api-key: $API_KEY" http://localhost:3456/approve/PRODUCTION_ID
+```
+
+Brand reference files are in `assets/brand/`. Treat the automated review as assistance, not scientific source verification; the channel owner remains the final approver.
+
 Already know what you're doing? `npm run setup` offers a classic quick mode, and `.env.example` documents every setting.
 
 ### Prerequisites

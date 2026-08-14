@@ -2,6 +2,7 @@ const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
+const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
 class ThumbnailDesignerAgent {
   constructor(db, credentials) {
@@ -66,6 +67,24 @@ class ThumbnailDesignerAgent {
   }
 
   async generateConcept(script) {
+    if (isBiologyMode()) {
+      return {
+        title: this.formatThumbnailTitle(script.title),
+        style: 'heritage-academic',
+        primaryText: this.extractBiologyPrimaryText(script.title),
+        secondaryText: 'MADE CLEAR',
+        elements: ['topic-specific Biology visual', 'torch motif', 'academic-paper panel'],
+        colors: {
+          primary: CHANNEL_PROFILE.brand.deepGreen,
+          secondary: CHANNEL_PROFILE.brand.turquoise,
+          accent: CHANNEL_PROFILE.brand.flameYellow
+        },
+        emotion: 'clear and confident',
+        composition: 'rule-of-thirds',
+        effects: { blur: false, vignette: false, glow: false, shadow: true, border: true }
+      };
+    }
+
     const concepts = {
       tutorial: {
         style: 'clean',
@@ -148,6 +167,14 @@ class ThumbnailDesignerAgent {
     return titleWords.find(word => word.length > 4)?.toUpperCase() || 'WATCH';
   }
 
+  extractBiologyPrimaryText(title) {
+    const clean = String(title)
+      .replace(/\([^)]*\)/g, '')
+      .replace(/[:|].*$/, '')
+      .trim();
+    return clean.split(/\s+/).slice(0, 4).join(' ').toUpperCase() || 'BIOLOGY';
+  }
+
   generateSecondaryText(script) {
     if (script.metadata && script.metadata.strategy) {
       const strategy = script.metadata.strategy;
@@ -196,6 +223,7 @@ class ThumbnailDesignerAgent {
     Emotional tone: ${concept.emotion}
     Composition: ${concept.composition}
     
+    ${isBiologyMode() ? 'Use the Blaize Tutors heritage-academic visual language. Keep the science topic-specific and accurate; do not add a generic DNA helix or microscope unless it belongs to this lesson.' : ''}
     The thumbnail should be eye-catching, professional, and optimized for high click-through rate.
     Resolution: 1280x720px
     Format: High contrast, bold text, clear imagery`;

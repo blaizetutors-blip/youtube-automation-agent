@@ -397,7 +397,7 @@ class Database {
     await this.executeQuery(
       `UPDATE publish_schedule SET 
         status = ?, youtube_id = ?, youtube_url = ?, 
-        published_at = ?, error_message = ?
+        published_at = ?, error_message = ?, metadata = ?, publish_time = ?
       WHERE id = ?`,
       [
         entry.status,
@@ -405,6 +405,8 @@ class Database {
         entry.youtubeUrl || null,
         entry.publishedAt || null,
         entry.error || null,
+        JSON.stringify(entry.metadata || {}),
+        entry.publishTime,
         entry.id
       ]
     );
@@ -413,7 +415,7 @@ class Database {
   async getPublishQueue() {
     const rows = await this.getAllRows(
       `SELECT * FROM publish_schedule 
-       WHERE status IN ('scheduled', 'paused') 
+       WHERE status IN ('awaiting_review', 'scheduled', 'paused')
        ORDER BY publish_time ASC`
     );
     

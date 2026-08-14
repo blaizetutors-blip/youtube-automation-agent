@@ -7,6 +7,7 @@ const { Database } = require('./database/db');
 const { CredentialManager } = require('./utils/credential-manager');
 const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
 const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+const { ContentReviewAgent } = require('./agents/content-review-agent');
 const { ThumbnailDesignerAgent } = require('./agents/thumbnail-designer-agent');
 const { SEOOptimizerAgent } = require('./agents/seo-optimizer-agent');
 const { ProductionManagementAgent } = require('./agents/production-management-agent');
@@ -15,6 +16,7 @@ const { AnalyticsOptimizationAgent } = require('./agents/analytics-optimization-
 const { DailyAutomation } = require('./schedules/daily-automation');
 const { version } = require('./package.json');
 const chalk = require('chalk');
+const { isBiologyMode, requiresHumanApproval } = require('./config/blaize-biology');
 
 class YouTubeAutomationAgent {
   constructor() {
@@ -76,6 +78,7 @@ class YouTubeAutomationAgent {
     this.agents = {
       strategy: new ContentStrategyAgent(this.db, this.credentials),
       scriptWriter: new ScriptWriterAgent(this.db, this.credentials),
+      contentReview: new ContentReviewAgent(this.db, this.credentials),
       thumbnailDesigner: new ThumbnailDesignerAgent(this.db, this.credentials),
       seoOptimizer: new SEOOptimizerAgent(this.db, this.credentials),
       production: new ProductionManagementAgent(this.db, this.credentials),
@@ -132,6 +135,12 @@ class YouTubeAutomationAgent {
   requireAPIKey() {
     return (req, res, next) => {
       if (!process.env.API_KEY) {
+        if (isBiologyMode()) {
+          return res.status(503).json({
+            success: false,
+            error: 'API_KEY must be configured before Blaize Biology automation routes can be used'
+          });
+        }
         return next();
       }
 
@@ -202,7 +211,10 @@ class YouTubeAutomationAgent {
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
     if (!process.env.API_KEY) {
-      this.logger.warn('API_KEY is not set; mutating API routes are unprotected');
+      const message = isBiologyMode()
+        ? 'API_KEY is not set; protected Blaize Biology API routes will remain disabled'
+        : 'API_KEY is not set; mutating API routes are unprotected';
+      this.logger.warn(message);
     }
     
     // Main dashboard route
@@ -238,7 +250,7 @@ class YouTubeAutomationAgent {
     });
 
     // Get analytics
-    this.app.get('/analytics', async (req, res) => {
+    this.app.get('/analytics', this.requireAPIKey(), async (req, res) => {
       try {
         const analytics = await this.agents.analytics.getRecentAnalytics();
         res.json(analytics);
@@ -248,7 +260,7 @@ class YouTubeAutomationAgent {
     });
 
     // Get upcoming schedule
-    this.app.get('/schedule', async (req, res) => {
+    this.app.get('/schedule', this.requireAPIKey(), async (req, res) => {
       try {
         const schedule = await this.db.getUpcomingSchedule();
         res.json(schedule);
@@ -267,6 +279,25 @@ class YouTubeAutomationAgent {
         res.status(500).json({ success: false, error: error.message });
       }
     });
+
+    // Inspect and approve a generated lesson before it can enter the upload queue
+    this.app.get('/review/:contentId', this.requireAPIKey(), async (req, res) => {
+      try {
+        const result = this.agents.publishing.getReview(req.params.contentId);
+        res.json({ success: true, result });
+      } catch (error) {
+        res.status(404).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/approve/:contentId', this.requireAPIKey(), async (req, res) => {
+      try {
+        const result = await this.agents.publishing.approveContent(req.params.contentId);
+        res.json({ success: true, result });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
   }
 
   async generateContent(topic = null, style = null, length = 'medium') {
@@ -279,29 +310,43 @@ class YouTubeAutomationAgent {
     // Step 2: Script Writing
     const script = await this.agents.scriptWriter.generateScript(strategy);
     this.logger.info(`Script generated: ${script.title}`);
+
+    // Step 3: Biology review gate. An automated pass is advisory only;
+    // human approval is still required before upload scheduling.
+    const review = await this.agents.contentReview.reviewScript(strategy, script);
+    this.logger.info(`Automated Biology review: ${review.automatedVerdict}`);
+    if (review.automatedVerdict === 'block') {
+      return {
+        contentId: null,
+        title: script.title,
+        status: 'review_blocked',
+        review
+      };
+    }
     
-    // Step 3: Thumbnail Design
+    // Step 4: Thumbnail Design
     const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
     this.logger.info('Thumbnail generated');
     
-    // Step 4: SEO Optimization
+    // Step 5: SEO Optimization
     const seoData = await this.agents.seoOptimizer.optimize(script, strategy);
     this.logger.info('SEO optimization complete');
     
-    // Step 5: Production Management
+    // Step 6: Production Management
     const productionData = await this.agents.production.processContent({
       strategy,
       script,
       thumbnail,
-      seo: seoData
+      seo: seoData,
+      review
     });
     this.logger.info('Production processing complete');
 
-    // Step 6: Save to database
+    // Step 7: Save to database
     const contentId = await this.db.saveProductionData(productionData);
     this.logger.info(`Content saved with ID: ${contentId}`);
 
-    // Step 7: Add to the publish queue (skipped automatically for simulated output)
+    // Step 8: Add to the review/upload queue (skipped for simulated output)
     const scheduleEntry = await this.agents.publishing.scheduleContent(productionData);
     if (scheduleEntry) {
       this.logger.info(`Content queued for publishing at ${scheduleEntry.publishTime}`);
@@ -311,6 +356,8 @@ class YouTubeAutomationAgent {
       contentId,
       title: script.title,
       status: productionData.status,
+      queueStatus: scheduleEntry ? scheduleEntry.status : null,
+      review,
       scheduledFor: scheduleEntry ? scheduleEntry.publishTime : null
     };
   }
@@ -332,7 +379,10 @@ class YouTubeAutomationAgent {
       console.log(chalk.white('📅 Schedule: ') + chalk.cyan(`http://localhost:${PORT}/schedule`));
       console.log(chalk.white('📈 Analytics: ') + chalk.cyan(`http://localhost:${PORT}/analytics`));
       console.log(chalk.gray('─'.repeat(50)));
-      console.log(chalk.yellow('\n🤖 Automation is active. Content will be generated and posted daily.'));
+      const automationMessage = requiresHumanApproval()
+        ? 'Automation is active. Content will be generated daily and held for human review.'
+        : 'Automation is active. Content will be generated and posted daily.';
+      console.log(chalk.yellow(`\n🤖 ${automationMessage}`));
     });
   }
 }

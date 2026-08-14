@@ -70,6 +70,8 @@ build/
 *.gif
 !examples/*.png
 !examples/*.jpg
+!assets/brand/*.png
+!assets/brand/*.jpg
 
 # Backup files
 *.backup

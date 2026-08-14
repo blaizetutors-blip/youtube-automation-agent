@@ -25,13 +25,14 @@ class DailyAutomation {
   }
 
   async setupScheduledTasks() {
+    const timezone = process.env.AUTOMATION_TIMEZONE || 'UTC';
     // Daily content generation at 6:00 AM
     this.scheduledTasks.set('daily-content-generation', 
       cron.schedule('0 6 * * *', async () => {
         if (this.isEnabled) {
           await this.runDailyContentGeneration();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Publishing queue processing every 15 minutes
@@ -40,7 +41,7 @@ class DailyAutomation {
         if (this.isEnabled) {
           await this.processPublishQueue();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Analytics collection at 9:00 AM daily
@@ -49,7 +50,7 @@ class DailyAutomation {
         if (this.isEnabled) {
           await this.collectDailyAnalytics();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Weekly strategy review on Sundays at 8:00 AM
@@ -58,7 +59,7 @@ class DailyAutomation {
         if (this.isEnabled) {
           await this.weeklyStrategyReview();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Optimization tasks daily at 10:00 PM
@@ -67,7 +68,7 @@ class DailyAutomation {
         if (this.isEnabled) {
           await this.runDailyOptimization();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Database maintenance weekly on Saturdays at 3:00 AM
@@ -76,7 +77,7 @@ class DailyAutomation {
         if (this.isEnabled) {
           await this.databaseMaintenance();
         }
-      }, { scheduled: false })
+      }, { scheduled: false, timezone })
     );
 
     // Start all scheduled tasks
@@ -108,6 +109,19 @@ class DailyAutomation {
       const script = await this.agents.scriptWriter.generateScript(strategy);
       this.logger.info(`Generated script: ${script.title}`);
 
+      // Run a cautious Biology review before spending media-generation credits.
+      const review = await this.agents.contentReview.reviewScript(strategy, script);
+      this.logger.info(`Automated Biology review: ${review.automatedVerdict}`);
+      if (review.automatedVerdict === 'block') {
+        this.logger.warn('Daily lesson blocked by automated review and not sent to production');
+        await this.logAutomationEvent('daily_content_generation', 'review_blocked', {
+          topic: strategy.topic,
+          reviewId: review.id,
+          issues: review.issues
+        });
+        return;
+      }
+
       // Generate thumbnail
       const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
       this.logger.info('Generated thumbnail');
@@ -121,7 +135,8 @@ class DailyAutomation {
         strategy,
         script,
         thumbnail,
-        seo: seoData
+        seo: seoData,
+        review
       });
       this.logger.info(`Production completed: ${productionData.id}`);
 
@@ -196,7 +211,7 @@ class DailyAutomation {
       const published = await this.agents.publishing.processPublishQueue();
       
       if (published > 0) {
-        this.logger.info(`Published ${published} videos from queue`);
+        this.logger.info(`Processed ${published} approved videos from the upload queue`);
         
         await this.logAutomationEvent('queue_processing', 'success', {
           publishedCount: published

@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
 class ScriptWriterAgent {
   constructor(db, credentials) {
@@ -57,6 +58,10 @@ class ScriptWriterAgent {
         this.logger.info(`Script generated with AI provider: ${aiScript.title}`);
         return aiScript;
       }
+
+      if (isBiologyMode()) {
+        throw new Error('Blaize Biology mode requires a configured AI provider; generic template scripts are disabled for accuracy.');
+      }
       
       this.logger.info('Using template script generation');
       // Generate script components
@@ -105,6 +110,19 @@ class ScriptWriterAgent {
       return null;
     }
 
+    const biologyRequirements = isBiologyMode()
+      ? `This is for ${CHANNEL_PROFILE.name} — ${CHANNEL_PROFILE.seriesName}.
+The audience is ${CHANNEL_PROFILE.audience}.
+Build the sections in this teaching sequence:
+1. precise learning objectives;
+2. prerequisite recall and clear definitions;
+3. step-by-step explanation using accepted secondary-school Biology;
+4. one concrete example, diagram description or data interpretation;
+5. a named common misconception and its correction;
+6. one exam-style application question followed by a concise model answer;
+7. practical-safety notes when laboratory work, specimens, heat, glassware or chemicals are involved.
+Use British English. Define specialist vocabulary before using it. Do not invent statistics, research, citations, personal experience or exam-board wording. Do not give medical diagnosis or treatment advice.`
+      : '';
     const prompt = `You are writing a YouTube script plan.
 Return only valid JSON with this exact shape:
 {
@@ -124,6 +142,7 @@ Desired length: ${process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'}
 Tone: ${template.tone}
 Pacing: ${template.pacing}
 Keywords: ${(strategy.keywords || []).join(', ')}
+${biologyRequirements}
 Avoid fabricated statistics, unsupported claims, and fake urgency.`;
 
     try {
@@ -220,6 +239,18 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
   }
 
   normalizeAICTA(cta, strategy) {
+    if (isBiologyMode()) {
+      const text = cta && typeof cta === 'object' ? cta.subscribe || cta.text : cta;
+      return {
+        type: 'call_to_action',
+        subscribe: String(text || `Subscribe to ${CHANNEL_PROFILE.name} for weekly Biology lessons and revision.`),
+        like: 'Like the lesson if the explanation helped you.',
+        comment: `Try the exam check for ${strategy.topic} and share your answer in the comments.`,
+        nextVideo: 'Continue with the next lesson in the Biology Series.',
+        duration: '15 seconds'
+      };
+    }
+
     if (cta && typeof cta === 'object') {
       return {
         type: 'call_to_action',
@@ -321,6 +352,16 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
   }
 
   async generateIntroduction(strategy) {
+    if (isBiologyMode()) {
+      return {
+        greeting: `Welcome to ${CHANNEL_PROFILE.name}.`,
+        topicIntro: `In this Biology lesson, we are studying ${strategy.topic}.`,
+        valueProposition: 'By the end, you should be able to explain the idea clearly and apply it to an exam-style question.',
+        credibility: 'We will use precise school-level Biology language and correct a common misconception as we go.',
+        duration: '0:05-0:20'
+      };
+    }
+
     return {
       greeting: "Hey everyone, welcome back to the channel!",
       topicIntro: `Today, we're diving deep into ${strategy.topic}.`,
@@ -627,6 +668,20 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
   }
 
   async generateConclusion(strategy) {
+    if (isBiologyMode()) {
+      return {
+        type: 'conclusion',
+        title: 'Exam recap',
+        recap: [
+          `Restate the key definition for ${strategy.topic}.`,
+          'Link structure to function or cause to effect.',
+          'Check the corrected misconception before attempting the exam question.'
+        ],
+        finalThought: 'Understand the science. Master the exam.',
+        duration: '30 seconds'
+      };
+    }
+
     return {
       type: 'conclusion',
       title: 'Wrapping Up',
@@ -644,6 +699,17 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
   }
 
   async generateCTA(strategy) {
+    if (isBiologyMode()) {
+      return {
+        type: 'call_to_action',
+        subscribe: `Subscribe to ${CHANNEL_PROFILE.name} for weekly Biology lessons and revision.`,
+        like: 'Like the lesson if the explanation helped you.',
+        comment: `Try the exam check for ${strategy.topic} and share your answer in the comments.`,
+        nextVideo: 'Continue with the next lesson in the Biology Series.',
+        duration: '15 seconds'
+      };
+    }
+
     return {
       type: 'call_to_action',
       subscribe: "If you found this helpful, make sure to subscribe and hit the notification bell!",

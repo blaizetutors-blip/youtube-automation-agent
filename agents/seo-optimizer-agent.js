@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
 class SEOOptimizerAgent {
   constructor(db, credentials) {
@@ -95,6 +96,11 @@ class SEOOptimizerAgent {
       return null;
     }
 
+    const biologyRequirements = isBiologyMode()
+      ? `Channel: ${CHANNEL_PROFILE.name} — ${CHANNEL_PROFILE.seriesName}.
+Audience: ${CHANNEL_PROFILE.audience}.
+Use British English and accurate, calm, exam-focused wording. Include relevant exam terms naturally. Add a short learning summary, the line "Understand the science. Master the exam.", and no placeholder links. Avoid clickbait, fake urgency, unsupported claims and keyword stuffing.`
+      : '';
     const prompt = `You are optimizing YouTube metadata.
 Return only valid JSON with this exact shape:
 {
@@ -109,6 +115,7 @@ Angle: ${strategy.angle}
 Content type: ${strategy.contentType}
 Target audience: ${strategy.targetAudience}
 Keywords: ${(strategy.keywords || []).join(', ')}
+${biologyRequirements}
 Keep tags under YouTube's 500 character total guidance. Avoid fabricated statistics and unsupported claims.`;
 
     try {
@@ -170,6 +177,11 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     return uniqueTags;
   }
   async optimizeTitle(originalTitle, strategy) {
+    if (isBiologyMode()) {
+      const cleanTitle = String(originalTitle).replace(/\s+/g, ' ').trim();
+      return cleanTitle.length <= 100 ? cleanTitle : `${cleanTitle.slice(0, 97)}...`;
+    }
+
     // YouTube title limit: 100 characters, optimal: 60-70
     let optimizedTitle = originalTitle;
     
@@ -219,6 +231,15 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
   }
 
   async generateDescription(script, strategy) {
+    if (isBiologyMode()) {
+      const sectionTitles = (script.mainContent?.sections || [])
+        .slice(0, 7)
+        .map(section => `• ${section.title}`)
+        .join('\n');
+      const hashtags = await this.generateHashtags(strategy);
+      return `${script.title}\n\nIn this Blaize Tutors Biology lesson, we explain ${strategy.topic} from first principles and connect it to exam application.\n\nWHAT YOU WILL LEARN\n${sectionTitles}\n\nSuitable for: ${CHANNEL_PROFILE.exams.join(' • ')}\n\nSubscribe for weekly Biology lessons, revision, practical guidance and exam-focused walkthroughs.\n\nUnderstand the science. Master the exam.\n\n${hashtags.join(' ')}`.slice(0, 5000);
+    }
+
     // YouTube description limit: 5000 characters, first 125 shown in search
     
     let description = '';
@@ -367,6 +388,10 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
   }
 
   identifyNiche(strategy) {
+    if (isBiologyMode()) {
+      return 'education';
+    }
+
     const topic = strategy.topic.toLowerCase();
     
     const niches = {
@@ -450,6 +475,11 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
   }
 
   async generateHashtags(strategy) {
+    if (isBiologyMode()) {
+      const topicTag = `#${strategy.topic.replace(/[^a-z0-9]+/gi, '')}`;
+      return [topicTag, '#Biology', '#BlaizeTutors', '#WAECBiology', '#JAMBBiology', '#IGCSEBiology'];
+    }
+
     const hashtags = [];
     
     // Primary hashtag
@@ -606,6 +636,10 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
   }
 
   selectCategory(strategy) {
+    if (isBiologyMode()) {
+      return CHANNEL_PROFILE.categoryId;
+    }
+
     const categories = {
       'technology': 28, // Science & Technology
       'gaming': 20, // Gaming

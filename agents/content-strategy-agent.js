@@ -1,6 +1,11 @@
 const axios = require('axios');
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const {
+  BIOLOGY_TOPICS,
+  CHANNEL_PROFILE,
+  isBiologyMode
+} = require('../config/blaize-biology');
 
 class ContentStrategyAgent {
   constructor(db, credentials) {
@@ -16,7 +21,16 @@ class ContentStrategyAgent {
   async initialize() {
     this.logger.info('Initializing Content Strategy Agent...');
     await this.loadHistoricalData();
-    await this.analyzeTrends();
+    if (isBiologyMode()) {
+      this.trendingTopics = BIOLOGY_TOPICS.map((topic, index) => ({
+        topic,
+        score: BIOLOGY_TOPICS.length - index,
+        sources: ['Blaize Tutors curriculum map']
+      }));
+      this.logger.info(`Loaded ${this.trendingTopics.length} syllabus-led Biology topics`);
+    } else {
+      await this.analyzeTrends();
+    }
     return true;
   }
 
@@ -266,6 +280,11 @@ class ContentStrategyAgent {
       .slice(0, 10)
       .map(topic => topic.topic)
       .join(', ');
+    const biologyBrief = isBiologyMode()
+      ? `Channel: ${CHANNEL_PROFILE.name} — ${CHANNEL_PROFILE.seriesName}.
+Audience: ${CHANNEL_PROFILE.audience}.
+Choose only secondary-school Biology. Prioritize syllabus coverage, conceptual sequencing, practical skills, data interpretation, misconceptions and exam application. Avoid general trends, medical advice, sensationalism and unsupported claims.`
+      : '';
     const prompt = `You are selecting a YouTube content strategy.
 Return only valid JSON with this exact shape:
 {
@@ -278,7 +297,8 @@ Return only valid JSON with this exact shape:
 
 Requested topic: ${requestedTopic || 'none'}
 Trending topics available: ${trendingTopics || 'Technology Trends'}
-Channel target audience: ${process.env.TARGET_AUDIENCE || 'General audience interested in educational content'}
+Channel target audience: ${process.env.TARGET_AUDIENCE || (isBiologyMode() ? CHANNEL_PROFILE.audience : 'General audience interested in educational content')}
+${biologyBrief}
 Avoid fabricated claims and unsupported numbers.`;
 
     try {
@@ -367,6 +387,10 @@ Avoid fabricated claims and unsupported numbers.`;
   }
 
   getEvergreenFallbackTopics() {
+    if (isBiologyMode()) {
+      return [...BIOLOGY_TOPICS];
+    }
+
     return [
       'Time Management Strategies That Actually Work',
       'Beginner Mistakes to Avoid When Learning a New Skill',
@@ -387,6 +411,17 @@ Avoid fabricated claims and unsupported numbers.`;
   }
 
   async generateAngle(topic) {
+    if (isBiologyMode()) {
+      const angles = [
+        `${topic}: explained from first principles`,
+        `${topic}: common misconceptions and exam traps`,
+        `${topic}: practical and data-interpretation focus`,
+        `${topic}: WAEC, NECO and UTME/JAMB exam clinic`,
+        `${topic}: IGCSE and GCSE application questions`
+      ];
+      return angles[Math.floor(Math.random() * angles.length)];
+    }
+
     // Generate unique angle for the topic
     const angles = [
       `The Ultimate Guide to ${topic}`,
@@ -403,6 +438,10 @@ Avoid fabricated claims and unsupported numbers.`;
   }
 
   async identifyTargetAudience(topic) {
+    if (isBiologyMode()) {
+      return CHANNEL_PROFILE.audience;
+    }
+
     // Simplified audience identification
     const audiences = {
       tech: 'Tech enthusiasts, developers, early adopters',
@@ -436,6 +475,10 @@ Avoid fabricated claims and unsupported numbers.`;
   }
 
   selectContentType(topic) {
+    if (isBiologyMode()) {
+      return /practical|test|investigation|experiment|data/i.test(topic) ? 'Tutorial' : 'Explainer';
+    }
+
     const types = [
       { type: 'Tutorial', suitableFor: ['how to', 'guide', 'learn'] },
       { type: 'List', suitableFor: ['best', 'top', 'worst'] },

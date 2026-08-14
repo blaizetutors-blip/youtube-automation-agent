@@ -1,7 +1,9 @@
 const path = require('path');
 const fs = require('fs').promises;
+const sharp = require('sharp');
 const { Logger } = require('../utils/logger');
 const { AIVideoGenerator } = require('../utils/ai-video-generator');
+const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
 class ProductionManagementAgent {
   constructor(db, credentials) {
@@ -48,7 +50,7 @@ class ProductionManagementAgent {
     try {
       this.logger.info('Processing content for production...');
       
-      const { strategy, script, thumbnail, seo } = contentData;
+      const { strategy, script, thumbnail, seo, review } = contentData;
       
       // Create production entry
       const productionId = this.generateProductionId();
@@ -59,6 +61,7 @@ class ProductionManagementAgent {
         script,
         thumbnail,
         seo,
+        review,
         status: 'processing',
         assets: {
           script: await this.processScript(script),
@@ -217,9 +220,10 @@ class ProductionManagementAgent {
       // Try to generate AI thumbnail first
       const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
       const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
+      const brandedPath = await this.applyBrandMark(aiThumbnail.path);
       
       return {
-        path: aiThumbnail.path,
+        path: brandedPath,
         originalPath: thumbnail.path,
         dimensions: aiThumbnail.dimensions,
         fileSize: aiThumbnail.fileSize,
@@ -249,6 +253,33 @@ class ProductionManagementAgent {
         fileSize: thumbnail.fileSize || 0
       };
     }
+  }
+
+  async applyBrandMark(thumbnailPath) {
+    if (!isBiologyMode() || path.extname(thumbnailPath).toLowerCase() === '.info') {
+      return thumbnailPath;
+    }
+
+    const logoPath = path.join(__dirname, '..', 'assets', 'brand', 'logo-tile.png');
+    const brandedPath = thumbnailPath.replace(/\.[^.]+$/, '_blaize.jpg');
+    const logo = await sharp(logoPath)
+      .resize(150, 150, { fit: 'contain' })
+      .png()
+      .toBuffer();
+    const seriesLabel = Buffer.from(`<svg width="500" height="70">
+      <rect width="500" height="70" rx="12" fill="${CHANNEL_PROFILE.brand.deepGreen}" stroke="${CHANNEL_PROFILE.brand.turquoise}" stroke-width="4"/>
+      <text x="26" y="47" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="${CHANNEL_PROFILE.brand.paper}">THE BIOLOGY SERIES</text>
+    </svg>`);
+
+    await sharp(thumbnailPath)
+      .resize(1280, 720, { fit: 'cover' })
+      .composite([
+        { input: seriesLabel, left: 36, top: 34 },
+        { input: logo, left: 1094, top: 534 }
+      ])
+      .jpeg({ quality: 92 })
+      .toFile(brandedPath);
+    return brandedPath;
   }
 
   calculatePublishTime(strategy) {
@@ -627,6 +658,15 @@ class ProductionManagementAgent {
 
   // Helper method to create visual prompts from script content
   createVisualPromptsFromScript(script) {
+    if (isBiologyMode()) {
+      const sharedStyle = `accurate secondary-school Biology visual, clear educational composition, no labels unless spelled correctly, deep green ${CHANNEL_PROFILE.brand.deepGreen}, turquoise ${CHANNEL_PROFILE.brand.turquoise}, warm paper ${CHANNEL_PROFILE.brand.paper}, torch-flame orange accents, no generic DNA or microscope unless scientifically relevant`;
+      const biologyPrompts = [`${script.title}, ${sharedStyle}`];
+      for (const section of script.mainContent?.sections || []) {
+        if (section.title) biologyPrompts.push(`${section.title}, ${sharedStyle}`);
+      }
+      return biologyPrompts.slice(0, 5);
+    }
+
     const prompts = [];
     
     // Title prompt

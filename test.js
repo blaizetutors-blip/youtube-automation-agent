@@ -26,6 +26,7 @@ class SystemTest {
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
+      { name: 'Blaize Biology Profile', test: () => this.testBlaizeBiologyProfile() },
       { name: 'Walkthrough Module', test: () => this.testWalkthroughModule() },
       { name: 'Logger System', test: () => this.testLogger() },
       { name: 'Directory Structure', test: () => this.testDirectories() },
@@ -492,6 +493,32 @@ class SystemTest {
     this.logger.info('Evergreen template topics test completed successfully');
   }
 
+  async testBlaizeBiologyProfile() {
+    const previousMode = process.env.BLAIZE_BIOLOGY_MODE;
+    const previousApproval = process.env.REQUIRE_HUMAN_APPROVAL;
+    process.env.BLAIZE_BIOLOGY_MODE = 'true';
+    process.env.REQUIRE_HUMAN_APPROVAL = 'true';
+    try {
+      const profile = require('./config/blaize-biology');
+      if (!profile.isBiologyMode() || !profile.requiresHumanApproval()) {
+        throw new Error('Blaize Biology safety mode is not active');
+      }
+      if (profile.CHANNEL_PROFILE.name !== 'Blaize Tutors') {
+        throw new Error('Blaize Tutors channel profile is missing');
+      }
+      if (profile.BIOLOGY_TOPICS.length < 15) {
+        throw new Error('Biology curriculum map is incomplete');
+      }
+    } finally {
+      if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;
+      else process.env.BLAIZE_BIOLOGY_MODE = previousMode;
+      if (previousApproval === undefined) delete process.env.REQUIRE_HUMAN_APPROVAL;
+      else process.env.REQUIRE_HUMAN_APPROVAL = previousApproval;
+    }
+
+    this.logger.info('Blaize Biology profile test completed successfully');
+  }
+
   async testWalkthroughModule() {
     const { SetupWalkthrough, AI_PROVIDER_GUIDE } = require('./walkthrough');
     const { PROVIDERS } = require('./utils/ai-text-service');
@@ -583,6 +610,7 @@ class SystemTest {
     const agentFiles = [
       './agents/content-strategy-agent',
       './agents/script-writer-agent',
+      './agents/content-review-agent',
       './agents/thumbnail-designer-agent',
       './agents/seo-optimizer-agent',
       './agents/production-management-agent',

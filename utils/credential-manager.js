@@ -45,12 +45,14 @@ class CredentialManager {
 
   async saveCredentials() {
     await fs.mkdir(path.dirname(this.credentialsPath), { recursive: true });
-    await fs.writeFile(this.credentialsPath, JSON.stringify(this.credentials, null, 2));
+    await fs.writeFile(this.credentialsPath, JSON.stringify(this.credentials, null, 2), { mode: 0o600 });
+    await fs.chmod(this.credentialsPath, 0o600);
   }
 
   async saveTokens() {
     await fs.mkdir(path.dirname(this.tokensPath), { recursive: true });
-    await fs.writeFile(this.tokensPath, JSON.stringify(this.tokens, null, 2));
+    await fs.writeFile(this.tokensPath, JSON.stringify(this.tokens, null, 2), { mode: 0o600 });
+    await fs.chmod(this.tokensPath, 0o600);
   }
 
   // YouTube API Authentication
@@ -103,7 +105,6 @@ class CredentialManager {
 
     const scopes = [
       'https://www.googleapis.com/auth/youtube.upload',
-      'https://www.googleapis.com/auth/youtube',
       'https://www.googleapis.com/auth/youtube.readonly',
       'https://www.googleapis.com/auth/yt-analytics.readonly'
     ];
