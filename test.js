@@ -24,6 +24,7 @@ class SystemTest {
       { name: 'Placeholder Scheduling Guard', test: () => this.testPlaceholderSchedulingGuard() },
       { name: 'FFmpeg Resolution', test: () => this.testFFmpegResolution() },
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
+      { name: 'Structured AI Generation Resilience', test: () => this.testStructuredAIGeneration() },
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Blaize Biology Profile', test: () => this.testBlaizeBiologyProfile() },
@@ -422,6 +423,91 @@ class SystemTest {
     }
 
     this.logger.info('Gemini media provider selection test completed successfully');
+  }
+
+  async testStructuredAIGeneration() {
+    const { AITextService } = require('./utils/ai-text-service');
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+
+    const service = new AITextService({});
+    let providerCalls = 0;
+    service.gemini = {
+      models: {
+        generateContent: async request => {
+          providerCalls++;
+          if (providerCalls === 1) {
+            const error = new Error('503 high demand');
+            error.status = 503;
+            throw error;
+          }
+          if (request.config.responseMimeType !== 'application/json' || !request.config.responseJsonSchema) {
+            throw new Error('Structured Gemini configuration was not forwarded');
+          }
+          return { text: '{"ok":true}' };
+        }
+      }
+    };
+    service.model = 'test-gemini';
+    service.providerName = 'Test Gemini';
+    service.sleep = async () => {};
+
+    const retryResult = await service.generateText('Return JSON', {
+      retries: 1,
+      responseMimeType: 'application/json',
+      responseJsonSchema: { type: 'object' }
+    });
+    if (retryResult !== '{"ok":true}' || providerCalls !== 2) {
+      throw new Error('Transient Gemini failure was not retried successfully');
+    }
+
+    const previousMode = process.env.BLAIZE_BIOLOGY_MODE;
+    process.env.BLAIZE_BIOLOGY_MODE = 'true';
+    try {
+      const writer = new ScriptWriterAgent({ saveScript: async () => {} }, {});
+      let scriptCalls = 0;
+      let structuredOptions;
+      writer.aiTextService = {
+        isAvailable: () => true,
+        providerName: 'Test Gemini',
+        generateText: async (_prompt, options) => {
+          scriptCalls++;
+          structuredOptions = options;
+          if (scriptCalls === 1) {
+            return '{"title":"Incomplete"';
+          }
+          return JSON.stringify({
+            title: 'Cell Structure Explained',
+            hook: 'A cell is organised, not simply filled with parts.',
+            sections: Array.from({ length: 5 }, (_, index) => ({
+              title: `Section ${index + 1}`,
+              content: [`Accurate Biology explanation ${index + 1}.`],
+              duration: 60
+            })),
+            cta: 'Continue learning with Blaize Tutors.'
+          });
+        }
+      };
+
+      const script = await writer.generateScriptWithAI({
+        topic: 'Cell structure and organisation',
+        contentType: 'Explainer',
+        angle: 'From organelles to organisation',
+        targetAudience: 'Secondary-school learners',
+        keywords: ['cell', 'organelle']
+      }, writer.templates.explainer);
+
+      if (!script || scriptCalls !== 2 || script.mainContent.sections.length !== 5) {
+        throw new Error('Malformed Biology JSON was not retried and normalized');
+      }
+      if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
+        throw new Error('Script writer did not request schema-constrained JSON');
+      }
+    } finally {
+      if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;
+      else process.env.BLAIZE_BIOLOGY_MODE = previousMode;
+    }
+
+    this.logger.info('Structured AI generation resilience test completed successfully');
   }
 
   async testSlideshowRenderer() {

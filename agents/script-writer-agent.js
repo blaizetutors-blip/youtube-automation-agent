@@ -2,6 +2,34 @@ const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
+const SCRIPT_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: ['title', 'hook', 'sections', 'cta'],
+  properties: {
+    title: { type: 'string' },
+    hook: { type: 'string' },
+    sections: {
+      type: 'array',
+      minItems: 5,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        required: ['title', 'content', 'duration'],
+        properties: {
+          title: { type: 'string' },
+          content: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'string' }
+          },
+          duration: { type: 'integer', minimum: 15, maximum: 180 }
+        }
+      }
+    },
+    cta: { type: 'string' }
+  }
+};
+
 class ScriptWriterAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -145,44 +173,64 @@ Keywords: ${(strategy.keywords || []).join(', ')}
 ${biologyRequirements}
 Avoid fabricated statistics, unsupported claims, and fake urgency.`;
 
-    try {
-      const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1800,
-        temperature: 0.7
-      });
-      const parsed = this.parseAIJsonResponse(response);
-      const sections = this.normalizeAISections(parsed.sections, strategy);
+    let lastError;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const retryInstruction = attempt > 1
+          ? '\nThis is a retry because the previous response was invalid. Return one complete JSON object only.'
+          : '';
+        const response = await this.aiTextService.generateText(prompt + retryInstruction, {
+          maxTokens: 4096,
+          temperature: 0.35,
+          retries: 2,
+          responseMimeType: 'application/json',
+          responseJsonSchema: SCRIPT_RESPONSE_SCHEMA
+        });
+        const parsed = this.parseAIJsonResponse(response);
+        const sections = this.normalizeAISections(parsed.sections, strategy);
 
-      if (!parsed.title || !parsed.hook || sections.length === 0) {
-        throw new Error('AI script response missing required fields');
-      }
-
-      this.logger.info(`Using AI script generation via ${this.aiTextService.providerName}`);
-      return {
-        title: String(parsed.title).slice(0, 100),
-        hook: this.normalizeAIHook(parsed.hook),
-        introduction: await this.generateIntroduction(strategy),
-        mainContent: {
-          sections,
-          totalDuration: this.calculateSectionsDuration(sections)
-        },
-        conclusion: await this.generateConclusion(strategy),
-        callToAction: this.normalizeAICTA(parsed.cta, strategy),
-        duration: this.estimateDuration({ sections }),
-        tone: template.tone,
-        pacing: template.pacing,
-        keywords: strategy.keywords || [],
-        metadata: {
-          strategy,
-          generatedAt: new Date().toISOString(),
-          version: '1.0',
-          generationSource: 'ai'
+        if (!parsed.title || !parsed.hook || sections.length === 0) {
+          throw new Error('AI script response missing required fields');
         }
-      };
-    } catch (error) {
-      this.logger.warn(`AI script generation failed; using template fallback: ${error.message}`);
-      return null;
+
+        this.logger.info(`Using AI script generation via ${this.aiTextService.providerName}`);
+        return {
+          title: String(parsed.title).slice(0, 100),
+          hook: this.normalizeAIHook(parsed.hook),
+          introduction: await this.generateIntroduction(strategy),
+          mainContent: {
+            sections,
+            totalDuration: this.calculateSectionsDuration(sections)
+          },
+          conclusion: await this.generateConclusion(strategy),
+          callToAction: this.normalizeAICTA(parsed.cta, strategy),
+          duration: this.estimateDuration({ sections }),
+          tone: template.tone,
+          pacing: template.pacing,
+          keywords: strategy.keywords || [],
+          metadata: {
+            strategy,
+            generatedAt: new Date().toISOString(),
+            version: '1.0',
+            generationSource: 'ai'
+          }
+        };
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          this.logger.warn(`AI script response was unusable; retrying: ${error.message}`);
+        }
+      }
     }
+
+    if (isBiologyMode()) {
+      throw new Error(
+        `AI Biology script generation did not return a complete validated response after retries: ${lastError.message}`
+      );
+    }
+
+    this.logger.warn(`AI script generation failed; using template fallback: ${lastError.message}`);
+    return null;
   }
 
   parseAIJsonResponse(response) {

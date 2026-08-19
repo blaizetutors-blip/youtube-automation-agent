@@ -94,15 +94,47 @@ class AITextService {
   }
 
   async generateText(prompt, options = {}) {
+    const retries = Math.max(0, Number.parseInt(options.retries ?? 2, 10) || 0);
+    let lastError;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await this.generateTextOnce(prompt, options);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= retries || !this.isRetryableError(error)) {
+          throw error;
+        }
+
+        const delayMs = Math.min(8000, 1500 * (2 ** attempt));
+        this.logger.warn(
+          `${this.providerName || 'AI provider'} is temporarily unavailable; ` +
+          `retrying in ${delayMs / 1000}s (${attempt + 1}/${retries})`
+        );
+        await this.sleep(delayMs);
+      }
+    }
+
+    throw lastError;
+  }
+
+  async generateTextOnce(prompt, options = {}) {
     const model = options.model || this.model;
     const maxTokens = options.maxTokens || 2048;
     const temperature = options.temperature ?? 0.7;
 
     if (this.gemini) {
+      const config = { maxOutputTokens: maxTokens, temperature };
+      for (const key of ['responseMimeType', 'responseSchema', 'responseJsonSchema']) {
+        if (options[key] !== undefined) {
+          config[key] = options[key];
+        }
+      }
+
       const response = await this.gemini.models.generateContent({
         model,
         contents: prompt,
-        config: { maxOutputTokens: maxTokens, temperature },
+        config,
       });
       return response.text;
     }
@@ -119,6 +151,20 @@ class AITextService {
     });
 
     return response.choices[0].message.content;
+  }
+
+  isRetryableError(error) {
+    const status = error?.status || error?.code || error?.response?.status;
+    if ([429, 500, 502, 503, 504].includes(Number(status))) {
+      return true;
+    }
+
+    const message = String(error?.message || error || '');
+    return /\b(?:429|500|502|503|504)\b|high demand|temporar(?:y|ily)|unavailable|resource exhausted|rate limit/i.test(message);
+  }
+
+  sleep(milliseconds) {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
   }
 
   isAvailable() {
