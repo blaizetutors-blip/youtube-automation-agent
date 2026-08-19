@@ -572,6 +572,7 @@ class SystemTest {
     const os = require('os');
     const sharp = require('sharp');
     const { ThumbnailDesignerAgent } = require('./agents/thumbnail-designer-agent');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
     const { AIVideoGenerator } = require('./utils/ai-video-generator');
 
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-markup-'));
@@ -595,6 +596,19 @@ class SystemTest {
       const thumbnailStats = await fs.stat(renderedThumbnail);
       if (!thumbnailStats.size) {
         throw new Error('XML-safe thumbnail overlay was not rendered');
+      }
+
+      const placeholderPath = path.join(dir, 'thumbnail.info');
+      await fs.writeFile(placeholderPath, 'placeholder');
+      const production = new ProductionManagementAgent({}, {});
+      production.aiVideoGenerator.generateThumbnail = async () => ({ path: placeholderPath });
+      production.applyBrandMark = async imagePath => imagePath;
+      const selectedThumbnail = await production.processThumbnail(
+        { path: baseImage, dimensions: { width: 1280, height: 720 } },
+        { title: 'Cells & Tissues' }
+      );
+      if (selectedThumbnail.path !== baseImage || selectedThumbnail.generatedWith !== 'Blaize heritage fallback') {
+        throw new Error('Placeholder thumbnail was not replaced by the usable heritage image');
       }
 
       const video = new AIVideoGenerator({});

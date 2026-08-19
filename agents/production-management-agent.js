@@ -220,14 +220,25 @@ class ProductionManagementAgent {
       // Try to generate AI thumbnail first
       const thumbnailScript = thumbnail.script || script || { title: thumbnail.title || 'Untitled Video' };
       const aiThumbnail = await this.aiVideoGenerator.generateThumbnail(thumbnailScript, 'ethereal');
-      const brandedPath = await this.applyBrandMark(aiThumbnail.path);
+      const aiThumbnailUsable = await this.isUsableImageFile(aiThumbnail.path);
+      const sourcePath = aiThumbnailUsable ? aiThumbnail.path : thumbnail.path;
+
+      if (!(await this.isUsableImageFile(sourcePath))) {
+        throw new Error('Neither the AI thumbnail nor the heritage fallback is a usable image');
+      }
+      if (!aiThumbnailUsable) {
+        this.logger.warn('AI thumbnail unavailable — using the rendered Blaize heritage thumbnail');
+      }
+
+      const brandedPath = await this.applyBrandMark(sourcePath);
+      const stats = await fs.stat(brandedPath);
       
       return {
         path: brandedPath,
         originalPath: thumbnail.path,
-        dimensions: aiThumbnail.dimensions,
-        fileSize: aiThumbnail.fileSize,
-        generatedWith: 'AI'
+        dimensions: { width: 1280, height: 720 },
+        fileSize: stats.size,
+        generatedWith: aiThumbnailUsable ? 'AI' : 'Blaize heritage fallback'
       };
     } catch (error) {
       this.logger.error('AI thumbnail generation failed:', error);
@@ -238,20 +249,42 @@ class ProductionManagementAgent {
         `thumbnail_${Date.now()}.jpg`
       );
       
-      if (thumbnail.path && await fs.access(thumbnail.path).then(() => true).catch(() => false)) {
-        const originalBuffer = await fs.readFile(thumbnail.path);
-        await fs.writeFile(productionThumbnailPath, originalBuffer);
-      } else {
-        // Create placeholder
-        await fs.writeFile(productionThumbnailPath + '.placeholder', 'Thumbnail placeholder');
+      if (await this.isUsableImageFile(thumbnail.path)) {
+        await sharp(thumbnail.path)
+          .resize(1280, 720, { fit: 'cover' })
+          .jpeg({ quality: 90 })
+          .toFile(productionThumbnailPath);
+        const stats = await fs.stat(productionThumbnailPath);
+        return {
+          path: productionThumbnailPath,
+          originalPath: thumbnail.path,
+          dimensions: { width: 1280, height: 720 },
+          fileSize: stats.size,
+          generatedWith: 'Blaize heritage fallback'
+        };
       }
-      
+
+      this.logger.warn('No usable thumbnail was produced; YouTube will use its generated default thumbnail');
       return {
-        path: productionThumbnailPath,
+        path: null,
         originalPath: thumbnail.path,
-        dimensions: thumbnail.dimensions || { width: 1792, height: 1024 },
-        fileSize: thumbnail.fileSize || 0
+        dimensions: null,
+        fileSize: 0,
+        generatedWith: 'YouTube default'
       };
+    }
+  }
+
+  async isUsableImageFile(imagePath) {
+    if (typeof imagePath !== 'string') return false;
+    const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+    if (!imageExtensions.has(path.extname(imagePath).toLowerCase())) return false;
+
+    try {
+      const metadata = await sharp(imagePath).metadata();
+      return Boolean(metadata.width && metadata.height);
+    } catch (error) {
+      return false;
     }
   }
 
