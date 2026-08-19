@@ -2,6 +2,16 @@ const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
 
+const SEO_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: ['title', 'description', 'tags'],
+  properties: {
+    title: { type: 'string' },
+    description: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } }
+  }
+};
+
 class SEOOptimizerAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -119,11 +129,13 @@ ${biologyRequirements}
 Keep tags under YouTube's 500 character total guidance. Avoid fabricated statistics and unsupported claims.`;
 
     try {
-      const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1400,
-        temperature: 0.6
+      const parsed = await this.aiTextService.generateJson(prompt, {
+        maxTokens: 3000,
+        temperature: 0.45,
+        retries: 2,
+        jsonRetries: 2,
+        responseJsonSchema: SEO_RESPONSE_SCHEMA
       });
-      const parsed = this.parseAIJsonResponse(response);
       const tags = this.normalizeAITags(parsed.tags, strategy);
 
       if (!parsed.title || !parsed.description || tags.length === 0) {

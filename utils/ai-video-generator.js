@@ -430,6 +430,15 @@ class AIVideoGenerator {
     return images;
   }
 
+  escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   createSlideshowHTML(script, visualAssets) {
     const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
     const brandLabel = biologyMode ? 'Blaize Tutors · The Biology Series' : 'YouTube Automation';
@@ -577,8 +586,8 @@ class AIVideoGenerator {
     <div class="slide active">
         ${visualAssets[0] ? `<img class="background-image" src="${visualAssets[0]}" />` : ''}
         <div class="content">
-            <div class="series-label">${brandLabel}</div>
-            <h1>${script.title}</h1>
+            <div class="series-label">${this.escapeHtml(brandLabel)}</div>
+            <h1>${this.escapeHtml(script.title)}</h1>
             <div class="accent-rule"></div>
             <p>Biology, explained. From first principles to exam marks.</p>
         </div>
@@ -590,9 +599,9 @@ class AIVideoGenerator {
     <div class="slide">
         <div class="content">
             <div class="series-label">Blaize Tutors</div>
-            <h2>${closingTitle}</h2>
+            <h2>${this.escapeHtml(closingTitle)}</h2>
             <div class="accent-rule"></div>
-            <p>${closingText}</p>
+            <p>${this.escapeHtml(closingText)}</p>
         </div>
     </div>
     
@@ -639,7 +648,7 @@ class AIVideoGenerator {
         <div class="slide">
             ${visualAssets[assetIndex] ? `<img class="background-image" src="${visualAssets[assetIndex]}" />` : ''}
             <div class="content">
-                <h2>${section.title}</h2>
+                <h2>${this.escapeHtml(section.title)}</h2>
                 ${this.formatSectionContent(section)}
             </div>
         </div>`);
@@ -652,18 +661,26 @@ class AIVideoGenerator {
   formatSectionContent(section) {
     if (section.items && Array.isArray(section.items)) {
       return section.items.slice(0, 3).map(item => 
-        `<p>${item.number}. ${item.title}</p>`
+        `<p>${this.escapeHtml(item.number)}. ${this.escapeHtml(item.title)}</p>`
       ).join('');
     }
     
     if (section.steps && Array.isArray(section.steps)) {
       return section.steps.slice(0, 3).map(step => 
-        `<p>${step.title}</p>`
+        `<p>${this.escapeHtml(step.title)}</p>`
       ).join('');
+    }
+
+    if (Array.isArray(section.content)) {
+      return section.content
+        .filter(item => typeof item === 'string' && item.trim())
+        .slice(0, 3)
+        .map(item => `<p>${this.escapeHtml(item.slice(0, 220))}${item.length > 220 ? '…' : ''}</p>`)
+        .join('');
     }
     
     if (typeof section.content === 'string') {
-      return `<p>${section.content.slice(0, 200)}${section.content.length > 200 ? '...' : ''}</p>`;
+      return `<p>${this.escapeHtml(section.content.slice(0, 200))}${section.content.length > 200 ? '…' : ''}</p>`;
     }
     
     return '<p>Content coming soon...</p>';
@@ -684,6 +701,13 @@ class AIVideoGenerator {
         if (typeof section.content === 'string') {
           totalWords += section.content.split(' ').length;
         }
+        if (Array.isArray(section.content)) {
+          totalWords += section.content
+            .filter(item => typeof item === 'string')
+            .join(' ')
+            .split(/\s+/)
+            .filter(Boolean).length;
+        }
         if (section.items) {
           section.items.forEach(item => {
             totalWords += (item.title + ' ' + item.description).split(' ').length;
@@ -698,7 +722,7 @@ class AIVideoGenerator {
     }
     
     if (script.conclusion) {
-      totalWords += script.conclusion.finalThought.split(' ').length;
+      totalWords += String(script.conclusion.finalThought || '').split(/\s+/).filter(Boolean).length;
     }
     
     // Convert to duration (150 words per minute)

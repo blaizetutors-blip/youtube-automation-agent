@@ -25,6 +25,7 @@ class SystemTest {
       { name: 'FFmpeg Resolution', test: () => this.testFFmpegResolution() },
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
       { name: 'Structured AI Generation Resilience', test: () => this.testStructuredAIGeneration() },
+      { name: 'Markup Rendering Safety', test: () => this.testMarkupRenderingSafety() },
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
       { name: 'Blaize Biology Profile', test: () => this.testBlaizeBiologyProfile() },
@@ -428,6 +429,9 @@ class SystemTest {
   async testStructuredAIGeneration() {
     const { AITextService } = require('./utils/ai-text-service');
     const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const { ContentReviewAgent } = require('./agents/content-review-agent');
+    const fs = require('fs').promises;
+    const os = require('os');
 
     const service = new AITextService({});
     let providerCalls = 0;
@@ -458,6 +462,59 @@ class SystemTest {
     });
     if (retryResult !== '{"ok":true}' || providerCalls !== 2) {
       throw new Error('Transient Gemini failure was not retried successfully');
+    }
+
+    const jsonService = new AITextService({});
+    let jsonCalls = 0;
+    let jsonOptions;
+    jsonService.providerName = 'Test Gemini';
+    jsonService.generateText = async (_prompt, options) => {
+      jsonCalls++;
+      jsonOptions = options;
+      return jsonCalls === 1 ? '{"verdict":"pass"' : '{"verdict":"pass"}';
+    };
+    const parsedJson = await jsonService.generateJson('Review this lesson', {
+      jsonRetries: 1,
+      responseJsonSchema: { type: 'object' }
+    });
+    if (jsonCalls !== 2 || parsedJson.verdict !== 'pass') {
+      throw new Error('Malformed structured JSON was not retried successfully');
+    }
+    if (jsonOptions.responseMimeType !== 'application/json' || !jsonOptions.responseJsonSchema) {
+      throw new Error('Structured JSON configuration was not enforced');
+    }
+
+    const reviewDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-review-'));
+    try {
+      const reviewer = new ContentReviewAgent(null, {});
+      reviewer.reviewsPath = reviewDir;
+      let reviewOptions;
+      reviewer.aiTextService = {
+        isAvailable: () => true,
+        generateJson: async (_prompt, options) => {
+          reviewOptions = options;
+          return {
+            verdict: 'pass',
+            summary: 'No blocking issue found.',
+            issues: [],
+            claimsToVerify: [],
+            curriculumChecks: ['Cell organisation covered.'],
+            practicalSafetyChecks: []
+          };
+        }
+      };
+      const review = await reviewer.reviewScript(
+        { topic: 'Cell structure', angle: 'Organisation', targetAudience: 'Secondary learners' },
+        { fullScript: 'A cell contains organised structures.' }
+      );
+      if (review.automatedVerdict !== 'pass') {
+        throw new Error('Structured Biology review result was not accepted');
+      }
+      if (!reviewOptions.responseJsonSchema || reviewOptions.maxTokens < 4096 || reviewOptions.jsonRetries < 2) {
+        throw new Error('Biology review did not request resilient schema-constrained JSON');
+      }
+    } finally {
+      await fs.rm(reviewDir, { recursive: true, force: true }).catch(() => {});
     }
 
     const previousMode = process.env.BLAIZE_BIOLOGY_MODE;
@@ -508,6 +565,71 @@ class SystemTest {
     }
 
     this.logger.info('Structured AI generation resilience test completed successfully');
+  }
+
+  async testMarkupRenderingSafety() {
+    const fs = require('fs').promises;
+    const os = require('os');
+    const sharp = require('sharp');
+    const { ThumbnailDesignerAgent } = require('./agents/thumbnail-designer-agent');
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-markup-'));
+    let renderedThumbnail;
+    try {
+      const baseImage = path.join(dir, 'base.png');
+      await sharp({
+        create: { width: 1280, height: 720, channels: 3, background: '#062C2A' }
+      }).png().toFile(baseImage);
+
+      const thumbnails = new ThumbnailDesignerAgent({ saveThumbnail: async () => {} }, {});
+      await thumbnails.ensureTemplatesDirectory();
+      if (thumbnails.hexToRgb('#062C2A') !== '#062C2A') {
+        throw new Error('Blaize hex brand colours were not preserved');
+      }
+      renderedThumbnail = await thumbnails.addTextOverlay(baseImage, {
+        primaryText: 'WAEC & GCSE <CELLS>',
+        secondaryText: 'STRUCTURE & ORGANISATION',
+        colors: { accent: '#FFD54A' }
+      });
+      const thumbnailStats = await fs.stat(renderedThumbnail);
+      if (!thumbnailStats.size) {
+        throw new Error('XML-safe thumbnail overlay was not rendered');
+      }
+
+      const video = new AIVideoGenerator({});
+      const script = {
+        title: 'Cells & Tissues <script>alert(1)</script>',
+        hook: { text: 'Cells are organised.' },
+        introduction: { greeting: 'Welcome', topicIntro: 'Cell organisation' },
+        mainContent: {
+          sections: [{
+            title: 'Plant & Animal Cells',
+            content: [
+              'The cell membrane controls movement into & out of the cell.',
+              'A tissue is a group of similar cells carrying out a function.',
+              new Array(120).fill('cell').join(' ')
+            ]
+          }]
+        },
+        conclusion: { finalThought: 'Organisation supports function.' }
+      };
+      const html = video.createSlideshowHTML(script, []);
+      if (html.includes('<script>alert(1)</script>') || !html.includes('&amp;') || !html.includes('&lt;script&gt;')) {
+        throw new Error('Slideshow text was not safely HTML-escaped');
+      }
+      if (!html.includes('cell membrane controls movement')) {
+        throw new Error('AI bullet content was not rendered on slides');
+      }
+      if (video.calculateScriptDuration(script) <= 30) {
+        throw new Error('AI bullet content was excluded from slideshow duration');
+      }
+    } finally {
+      if (renderedThumbnail) await fs.unlink(renderedThumbnail).catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Markup rendering safety test completed successfully');
   }
 
   async testSlideshowRenderer() {

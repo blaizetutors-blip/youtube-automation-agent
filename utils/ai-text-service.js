@@ -118,6 +118,51 @@ class AITextService {
     throw lastError;
   }
 
+  async generateJson(prompt, options = {}) {
+    const jsonRetries = Math.max(0, Number.parseInt(options.jsonRetries ?? 2, 10) || 0);
+    let lastError;
+
+    for (let attempt = 0; attempt <= jsonRetries; attempt++) {
+      try {
+        const retryInstruction = attempt > 0
+          ? '\nThe previous response was incomplete or invalid. Return one complete JSON object only.'
+          : '';
+        const response = await this.generateText(prompt + retryInstruction, {
+          ...options,
+          responseMimeType: 'application/json',
+          responseJsonSchema: options.responseJsonSchema,
+        });
+        return this.parseJsonResponse(response);
+      } catch (error) {
+        lastError = error;
+        if (attempt < jsonRetries) {
+          this.logger.warn(
+            `${this.providerName || 'AI provider'} returned unusable JSON; ` +
+            `retrying (${attempt + 1}/${jsonRetries}): ${error.message}`
+          );
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  parseJsonResponse(response) {
+    const text = String(response || '')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) throw error;
+      return JSON.parse(match[0]);
+    }
+  }
+
   async generateTextOnce(prompt, options = {}) {
     const model = options.model || this.model;
     const maxTokens = options.maxTokens || 2048;

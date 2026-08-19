@@ -4,6 +4,26 @@ const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { CHANNEL_PROFILE } = require('../config/blaize-biology');
 
+const REVIEW_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: [
+    'verdict',
+    'summary',
+    'issues',
+    'claimsToVerify',
+    'curriculumChecks',
+    'practicalSafetyChecks'
+  ],
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'needs_changes', 'block'] },
+    summary: { type: 'string' },
+    issues: { type: 'array', items: { type: 'string' } },
+    claimsToVerify: { type: 'array', items: { type: 'string' } },
+    curriculumChecks: { type: 'array', items: { type: 'string' } },
+    practicalSafetyChecks: { type: 'array', items: { type: 'string' } }
+  }
+};
+
 class ContentReviewAgent {
   constructor(_db, credentials) {
     this.logger = new Logger('ContentReview');
@@ -35,11 +55,13 @@ class ContentReviewAgent {
 
     if (this.aiTextService.isAvailable()) {
       try {
-        const response = await this.aiTextService.generateText(this.buildPrompt(strategy, script), {
-          maxTokens: 1800,
-          temperature: 0.1
+        const parsed = await this.aiTextService.generateJson(this.buildPrompt(strategy, script), {
+          maxTokens: 4096,
+          temperature: 0.1,
+          retries: 2,
+          jsonRetries: 2,
+          responseJsonSchema: REVIEW_RESPONSE_SCHEMA
         });
-        const parsed = this.parseAIJsonResponse(response);
         review.automatedVerdict = this.normalizeVerdict(parsed.verdict);
         review.summary = String(parsed.summary || review.summary).trim();
         review.issues = this.normalizeList(parsed.issues);
@@ -90,21 +112,6 @@ ${this.scriptText(script)}`;
   scriptText(script) {
     if (script.fullScript) return String(script.fullScript).slice(0, 24000);
     return JSON.stringify(script).slice(0, 24000);
-  }
-
-  parseAIJsonResponse(response) {
-    const text = String(response || '')
-      .trim()
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/```$/i, '')
-      .trim();
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (!match) throw error;
-      return JSON.parse(match[0]);
-    }
   }
 
   normalizeVerdict(value) {

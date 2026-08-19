@@ -275,11 +275,26 @@ class ThumbnailDesignerAgent {
       'gold': '#FFD700'
     };
     
-    return colors[color] || '#000000';
+    const value = String(color || '').trim();
+    if (/^#[0-9a-f]{3,8}$/i.test(value)) {
+      return value;
+    }
+    return colors[value.toLowerCase()] || '#000000';
+  }
+
+  escapeXml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
   }
 
   async addTextOverlay(imagePath, concept) {
     const outputPath = path.join(__dirname, '..', 'uploads', 'thumbnails', `thumbnail_final_${Date.now()}.png`);
+    const primaryText = this.escapeXml(concept.primaryText);
+    const secondaryText = this.escapeXml(concept.secondaryText);
     
     // Create text overlay SVG
     const textSvg = `
@@ -306,12 +321,12 @@ class ThumbnailDesignerAgent {
         </style>
         
         <!-- Shadow -->
-        <text x="642" y="302" class="primary shadow">${concept.primaryText}</text>
-        <text x="642" y="402" class="secondary shadow">${concept.secondaryText}</text>
+        <text x="642" y="302" class="primary shadow">${primaryText}</text>
+        <text x="642" y="402" class="secondary shadow">${secondaryText}</text>
         
         <!-- Main text -->
-        <text x="640" y="300" class="primary">${concept.primaryText}</text>
-        <text x="640" y="400" class="secondary">${concept.secondaryText}</text>
+        <text x="640" y="300" class="primary">${primaryText}</text>
+        <text x="640" y="400" class="secondary">${secondaryText}</text>
       </svg>
     `;
     

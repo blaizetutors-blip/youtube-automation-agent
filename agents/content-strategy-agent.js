@@ -7,6 +7,21 @@ const {
   isBiologyMode
 } = require('../config/blaize-biology');
 
+const STRATEGY_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: ['topic', 'angle', 'targetAudience', 'contentType', 'keywords'],
+  properties: {
+    topic: { type: 'string' },
+    angle: { type: 'string' },
+    targetAudience: { type: 'string' },
+    contentType: {
+      type: 'string',
+      enum: ['Tutorial', 'Explainer', 'List', 'Review', 'Story', 'News']
+    },
+    keywords: { type: 'array', items: { type: 'string' } }
+  }
+};
+
 class ContentStrategyAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -302,11 +317,13 @@ ${biologyBrief}
 Avoid fabricated claims and unsupported numbers.`;
 
     try {
-      const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1000,
-        temperature: 0.7
+      const parsed = await this.aiTextService.generateJson(prompt, {
+        maxTokens: 1800,
+        temperature: 0.5,
+        retries: 2,
+        jsonRetries: 2,
+        responseJsonSchema: STRATEGY_RESPONSE_SCHEMA
       });
-      const parsed = this.parseAIJsonResponse(response);
       const topic = String(parsed.topic || requestedTopic || '').trim();
 
       if (!topic) {
