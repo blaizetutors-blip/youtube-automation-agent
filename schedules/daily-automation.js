@@ -2,9 +2,10 @@ const cron = require('node-cron');
 const { Logger } = require('../utils/logger');
 
 class DailyAutomation {
-  constructor(agents, database) {
+  constructor(agents, database, jobManager = null) {
     this.agents = agents;
     this.db = database;
+    this.jobManager = jobManager;
     this.logger = new Logger('DailyAutomation');
     this.scheduledTasks = new Map();
     this.isEnabled = true;
@@ -28,56 +29,56 @@ class DailyAutomation {
     const timezone = process.env.AUTOMATION_TIMEZONE || 'UTC';
     // Daily content generation at 6:00 AM
     this.scheduledTasks.set('daily-content-generation', 
-      cron.schedule('0 6 * * *', async () => {
+      cron.createTask('0 6 * * *', async () => {
         if (this.isEnabled) {
           await this.runDailyContentGeneration();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Publishing queue processing every 15 minutes
     this.scheduledTasks.set('publish-queue-processing',
-      cron.schedule('*/15 * * * *', async () => {
+      cron.createTask('*/15 * * * *', async () => {
         if (this.isEnabled) {
           await this.processPublishQueue();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Analytics collection at 9:00 AM daily
     this.scheduledTasks.set('daily-analytics',
-      cron.schedule('0 9 * * *', async () => {
+      cron.createTask('0 9 * * *', async () => {
         if (this.isEnabled) {
           await this.collectDailyAnalytics();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Weekly strategy review on Sundays at 8:00 AM
     this.scheduledTasks.set('weekly-strategy-review',
-      cron.schedule('0 8 * * 0', async () => {
+      cron.createTask('0 8 * * 0', async () => {
         if (this.isEnabled) {
           await this.weeklyStrategyReview();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Optimization tasks daily at 10:00 PM
     this.scheduledTasks.set('daily-optimization',
-      cron.schedule('0 22 * * *', async () => {
+      cron.createTask('0 22 * * *', async () => {
         if (this.isEnabled) {
           await this.runDailyOptimization();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Database maintenance weekly on Saturdays at 3:00 AM
     this.scheduledTasks.set('database-maintenance',
-      cron.schedule('0 3 * * 6', async () => {
+      cron.createTask('0 3 * * 6', async () => {
         if (this.isEnabled) {
           await this.databaseMaintenance();
         }
-      }, { scheduled: false, timezone })
+      }, { timezone })
     );
 
     // Start all scheduled tasks
@@ -98,6 +99,33 @@ class DailyAutomation {
       
       if (!shouldGenerate) {
         this.logger.info('Skipping content generation - sufficient content in pipeline');
+        return;
+      }
+
+      if (this.jobManager) {
+        const activeJobs = await this.db.getGenerationJobs({
+          statuses: ['queued', 'running', 'retry_wait'],
+          limit: 100
+        });
+        const existingDailyJob = activeJobs.find(job => job.request?.source === 'daily-automation');
+        if (existingDailyJob) {
+          this.logger.info(
+            `Skipping duplicate daily generation; job ${existingDailyJob.id} is ${existingDailyJob.status}`
+          );
+          timer.end();
+          return;
+        }
+        const job = await this.jobManager.createJob({
+          topic: null,
+          style: null,
+          length: 'medium',
+          source: 'daily-automation'
+        });
+        await this.logAutomationEvent('daily_content_generation', 'queued', {
+          jobId: job.id
+        });
+        timer.end();
+        this.logger.success(`Daily content generation queued as durable job ${job.id}`);
         return;
       }
 

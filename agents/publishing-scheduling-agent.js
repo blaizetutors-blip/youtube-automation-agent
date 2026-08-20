@@ -182,8 +182,83 @@ class PublishingSchedulingAgent {
     if (metadata.captions && metadata.captions.path) {
       await this.uploadCaptions(videoId, metadata.captions.path);
     }
+
+    const playlist = await this.organizeIntoPlaylist(videoId, metadata.seo?.playlist);
     
-    return videoUpload.data;
+    return { ...videoUpload.data, playlist };
+  }
+
+  async organizeIntoPlaylist(videoId, playlistMetadata) {
+    if (String(process.env.AUTO_MANAGE_PLAYLISTS || 'true').toLowerCase() !== 'true') {
+      return null;
+    }
+    if (!playlistMetadata?.title) {
+      this.logger.warn('Playlist organization skipped: no playlist metadata was generated');
+      return null;
+    }
+
+    try {
+      const playlist = await this.getOrCreatePlaylist(playlistMetadata);
+      const existing = await this.youtube.playlistItems.list({
+        part: 'snippet',
+        playlistId: playlist.id,
+        videoId,
+        maxResults: 1
+      });
+      if (!existing.data.items?.length) {
+        await this.youtube.playlistItems.insert({
+          part: 'snippet',
+          requestBody: {
+            snippet: {
+              playlistId: playlist.id,
+              resourceId: { kind: 'youtube#video', videoId }
+            }
+          }
+        });
+      }
+      this.logger.info(`Video organized into playlist: ${playlist.snippet.title}`);
+      return { id: playlist.id, title: playlist.snippet.title };
+    } catch (error) {
+      // The upload is valuable even if an older OAuth token lacks playlist scope.
+      this.logger.warn(
+        `Video uploaded, but playlist organization failed: ${error.message}. ` +
+        'Re-run YouTube authorization if the token predates playlist support.'
+      );
+      return null;
+    }
+  }
+
+  async getOrCreatePlaylist(metadata) {
+    let pageToken;
+    do {
+      const response = await this.youtube.playlists.list({
+        part: 'snippet,status',
+        mine: true,
+        maxResults: 50,
+        pageToken
+      });
+      const match = response.data.items?.find(item =>
+        item.snippet?.title?.trim().toLowerCase() === metadata.title.trim().toLowerCase()
+      );
+      if (match) return match;
+      pageToken = response.data.nextPageToken;
+    } while (pageToken);
+
+    const created = await this.youtube.playlists.insert({
+      part: 'snippet,status',
+      requestBody: {
+        snippet: {
+          title: metadata.title,
+          description: metadata.description || ''
+        },
+        status: {
+          privacyStatus: ['private', 'public', 'unlisted'].includes(metadata.privacyStatus)
+            ? metadata.privacyStatus
+            : 'private'
+        }
+      }
+    });
+    return created.data;
   }
 
   async getVideoStream(videoPath) {

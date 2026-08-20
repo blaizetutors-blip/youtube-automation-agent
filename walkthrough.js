@@ -46,6 +46,19 @@ const AI_PROVIDER_GUIDE = {
     },
     validationCreds: (apiKey, model) => ({ aiProvider: { provider: 'openai', apiKey, model } })
   },
+  groq: {
+    label: 'Groq — fast independent text fallback (free/paid limits vary)',
+    keyUrl: 'https://console.groq.com/keys',
+    keyHint: 'from the Groq developer console',
+    instructions: ['Create a Groq account', 'Open API Keys and create a key'],
+    models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+    defaultModel: 'llama-3.3-70b-versatile',
+    covers: 'scripts only; retain Gemini or OpenAI for images and narration',
+    save(credentials, apiKey, model) {
+      credentials.aiProvider = { provider: 'groq', apiKey, model };
+    },
+    validationCreds: (apiKey, model) => ({ aiProvider: { provider: 'groq', apiKey, model } })
+  },
   openrouter: {
     label: 'OpenRouter — one key, 300+ models (pay per use)',
     keyUrl: 'https://openrouter.ai/keys',

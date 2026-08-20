@@ -105,6 +105,7 @@ class CredentialManager {
 
     const scopes = [
       'https://www.googleapis.com/auth/youtube.upload',
+      'https://www.googleapis.com/auth/youtube.force-ssl',
       'https://www.googleapis.com/auth/youtube.readonly',
       'https://www.googleapis.com/auth/yt-analytics.readonly'
     ];
@@ -223,6 +224,36 @@ class CredentialManager {
 
     await this.saveCredentials();
     console.log(chalk.green('✅ Gemini credentials configured successfully!'));
+  }
+
+  async setupGroqCredentials() {
+    console.log(chalk.cyan('\nGroq Setup'));
+    console.log(chalk.gray('Get your API key from: https://console.groq.com/keys'));
+
+    const answers = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'apiKey',
+        message: 'Enter your Groq API Key:',
+        validate: input => input.length > 0 || 'API key is required'
+      },
+      {
+        type: 'list',
+        name: 'model',
+        message: 'Select fallback model:',
+        choices: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+        default: 'llama-3.3-70b-versatile'
+      }
+    ]);
+
+    this.credentials.aiProvider = {
+      provider: 'groq',
+      apiKey: answers.apiKey,
+      model: answers.model
+    };
+
+    await this.saveCredentials();
+    console.log(chalk.green('✅ Groq fallback configured successfully!'));
   }
 
   // OpenRouter Setup
@@ -541,7 +572,7 @@ class CredentialManager {
     }
 
     if (!this.hasAITextProvider()) {
-      missing.push('an AI provider (OpenAI, Gemini, OpenRouter, Kimi, MiMo, or GLM)');
+      missing.push('an AI provider (Gemini, Groq, OpenAI, OpenRouter, Kimi, MiMo, or GLM)');
     }
 
     return missing;
@@ -620,7 +651,7 @@ class CredentialManager {
 
     const setupSteps = [
       { name: '🎬 YouTube API', action: () => this.setupYouTubeCredentials() },
-      { name: '🤖 AI Service (OpenAI/Gemini)', action: () => this.setupAIService() },
+      { name: '🤖 AI Service (Gemini/Groq/OpenAI)', action: () => this.setupAIService() },
       { name: '🎙️  Text-to-Speech Service', action: () => this.setupTTSService() },
       { name: '📺 Channel Configuration', action: () => this.setupChannelConfig() },
       { name: '📝 Content Configuration', action: () => this.setupContentConfig() }
@@ -647,6 +678,7 @@ class CredentialManager {
         choices: [
           { name: 'OpenAI (GPT-5.5)', value: 'openai' },
           { name: 'Google Gemini (Gemini 3.5 — free tier)', value: 'gemini' },
+          { name: 'Groq (fast independent fallback)', value: 'groq' },
           { name: 'OpenRouter (300+ models, one API key)', value: 'openrouter' },
           { name: 'Kimi (Moonshot AI — K2.6)', value: 'kimi' },
           { name: 'MiMo (Xiaomi — V2.5 Pro)', value: 'mimo' },
@@ -658,6 +690,7 @@ class CredentialManager {
     switch (service) {
       case 'openai': return await this.setupOpenAICredentials();
       case 'gemini': return await this.setupGeminiCredentials();
+      case 'groq': return await this.setupGroqCredentials();
       case 'openrouter': return await this.setupOpenRouterCredentials();
       case 'kimi': return await this.setupKimiCredentials();
       case 'mimo': return await this.setupMiMoCredentials();

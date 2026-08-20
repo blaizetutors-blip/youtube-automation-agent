@@ -185,6 +185,23 @@ class Database {
         data TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`,
+      // Durable generation jobs. These rows survive server and laptop restarts.
+      `CREATE TABLE IF NOT EXISTS generation_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'queued',
+        stage TEXT NOT NULL DEFAULT 'queued',
+        progress INTEGER NOT NULL DEFAULT 0,
+        message TEXT,
+        request TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
             // System Settings
       `CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -546,6 +563,96 @@ class Database {
       settings[row.key] = row.value;
       return settings;
     }, {});
+  }
+
+  // Durable content-generation jobs
+  async createGenerationJob(request) {
+    const id = this.generateId('job');
+    await this.executeQuery(
+      `INSERT INTO generation_jobs (
+        id, status, stage, progress, request, retry_count, created_at, updated_at
+      ) VALUES (?, 'queued', 'queued', 0, ?, 0, datetime('now'), datetime('now'))`,
+      [id, JSON.stringify(request || {})]
+    );
+    return this.getGenerationJob(id);
+  }
+
+  async updateGenerationJob(id, changes = {}) {
+    const allowed = new Map([
+      ['status', 'status'],
+      ['stage', 'stage'],
+      ['progress', 'progress'],
+      ['message', 'message'],
+      ['result', 'result'],
+      ['error', 'error'],
+      ['retryCount', 'retry_count'],
+      ['nextAttemptAt', 'next_attempt_at'],
+      ['startedAt', 'started_at'],
+      ['completedAt', 'completed_at']
+    ]);
+    const assignments = [];
+    const values = [];
+    for (const [key, column] of allowed.entries()) {
+      if (!Object.prototype.hasOwnProperty.call(changes, key)) continue;
+      assignments.push(`${column} = ?`);
+      const value = ['result', 'error'].includes(key) && changes[key] !== null
+        ? JSON.stringify(changes[key])
+        : changes[key];
+      values.push(value);
+    }
+    if (assignments.length === 0) return this.getGenerationJob(id);
+    assignments.push("updated_at = datetime('now')");
+    values.push(id);
+    await this.executeQuery(
+      `UPDATE generation_jobs SET ${assignments.join(', ')} WHERE id = ?`,
+      values
+    );
+    return this.getGenerationJob(id);
+  }
+
+  async getGenerationJob(id) {
+    const row = await this.getRow('SELECT * FROM generation_jobs WHERE id = ?', [id]);
+    return row ? this.deserializeGenerationJob(row) : null;
+  }
+
+  async getGenerationJobs(options = {}) {
+    const statuses = Array.isArray(options.statuses) ? options.statuses.filter(Boolean) : [];
+    const limit = Math.min(100, Math.max(1, Number.parseInt(options.limit || 20, 10) || 20));
+    const where = statuses.length > 0
+      ? `WHERE status IN (${statuses.map(() => '?').join(', ')})`
+      : '';
+    const rows = await this.getAllRows(
+      `SELECT * FROM generation_jobs ${where} ORDER BY created_at DESC LIMIT ?`,
+      [...statuses, limit]
+    );
+    return rows.map(row => this.deserializeGenerationJob(row));
+  }
+
+  deserializeGenerationJob(row) {
+    const parse = value => {
+      if (value === null || value === undefined || value === '') return null;
+      try {
+        return JSON.parse(value);
+      } catch (error) {
+        return { message: String(value) };
+      }
+    };
+    return {
+      id: row.id,
+      status: row.status,
+      stage: row.stage,
+      progress: row.progress,
+      message: row.message,
+      request: parse(row.request) || {},
+      result: parse(row.result),
+      error: parse(row.error),
+      retryCount: row.retry_count,
+      nextAttemptAt: row.next_attempt_at,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
   }
 
   // Utility methods

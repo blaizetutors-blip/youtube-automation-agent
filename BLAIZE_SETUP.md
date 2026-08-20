@@ -30,7 +30,7 @@ Do not paste that value, an AI-provider key, a Google client secret or an OAuth 
 
 ## 2. Choose one AI provider
 
-Add one provider key to `.env`. Gemini can cover text, images and narration with one key; OpenAI can also cover all three. Other supported text providers need a separate media/TTS provider for a complete video.
+Keep Gemini as the primary full-pipeline provider. For independent text resilience, optionally add `GROQ_API_KEY` and set `AI_PROVIDER_ORDER=gemini,groq`. OpenAI can also cover text, images and narration. Text-only providers still need Gemini, OpenAI, ElevenLabs or Azure for narration.
 
 The Gemini free tier currently supports the text and TTS portions used by this pilot, but generated image availability depends on the model and billing tier. If image generation is unavailable, the video uses the Blaize Tutors heritage slide design instead of generic placeholder branding. Paid Gemini image generation is optional for the private pilot.
 
@@ -57,7 +57,7 @@ In Google Cloud Console:
 
 7. Run `npm run credentials:setup` and complete consent in your browser.
 
-The tailored build requests only upload, read-only YouTube and read-only Analytics scopes. Credential and token files are ignored by Git and saved with owner-only file permissions on supported systems.
+The tailored build requests upload, playlist-management, read-only YouTube and read-only Analytics scopes. Credential and token files are ignored by Git and saved with owner-only file permissions on supported systems. Existing users must run `npm run credentials:setup` once after upgrading so the token includes playlist access.
 
 ## 4. Install and start
 
@@ -77,7 +77,42 @@ curl -X POST http://localhost:3456/generate \
   -d '{"topic":"Cell structure and organisation","style":"explainer"}'
 ```
 
-The result should report `queueStatus: "awaiting_review"`. Nothing is uploaded yet.
+The endpoint now returns HTTP 202 immediately. Save `job.id`; the job continues independently of the PowerShell window and survives restarts.
+
+Check its progress:
+
+```bash
+curl -H "x-api-key: $API_KEY" http://localhost:3456/jobs/JOB_ID
+```
+
+Wait for `status` to become `completed` or `review_blocked`. A provider outage appears as `retry_wait`, including the next automatic retry time; do not submit a duplicate job.
+
+On Windows PowerShell, leave `npm start` running in the first window and use a second window:
+
+```powershell
+$Headers = @{ "x-api-key" = $BlaizeApiKey }
+$Body = @{ topic = "Cell structure and organisation"; style = "explainer" } | ConvertTo-Json
+$Generation = Invoke-RestMethod -Method Post -Uri "http://localhost:3456/generate" -Headers $Headers -ContentType "application/json" -Body $Body
+$JobId = $Generation.job.id
+
+do {
+    Start-Sleep -Seconds 10
+    $Status = Invoke-RestMethod -Uri "http://localhost:3456/jobs/$JobId" -Headers $Headers
+    $Status.job | Select-Object id, status, stage, progress, message, nextAttemptAt
+} while ($Status.job.status -in @("queued", "running", "retry_wait"))
+```
+
+## Paid Gemini pilot budget
+
+For one 7–10 minute lesson per day, start with Google's minimum prepaid credit and use a **$20 monthly working budget with a $25 alert**. The expected direct Gemini cost is approximately **$0.35–$0.55 per completed episode**: roughly $0.08–$0.15 for structured text, $0.21–$0.30 for narration, and about $0.067 for one 1K supplemental image. Actual usage varies with retries and lesson length.
+
+Keep full-motion lesson visuals in the deterministic Three.js/FFmpeg renderer. Per-second generative video would cost dramatically more and is not required for defensible 3D Biology animation.
+
+To enable paid Gemini, open [Google AI Studio billing](https://ai.google.dev/gemini-api/docs/billing), select the same project as the API key, choose **Set up billing**, link a Cloud Billing account/payment method, and keep the existing key in `.env`. Add a Google Cloud budget alert at $20 and $25; budget alerts notify you but do not necessarily hard-stop usage.
+
+## Known dependency-audit residual risk
+
+The v3.3 safe dependency refresh leaves 10 production audit findings (2 low, 2 moderate, 5 high and 1 critical). The highest-severity paths are inherited by SQLite 5's native build toolchain and Sharp's bundled image stack. Their available fixes require breaking major-version upgrades, so they are intentionally deferred to a separately tested Windows/rendering migration. Install only from the official repository and npm registry; do not use unofficial Gemini-cookie proxies, prebuilt binaries from unknown forks or downloadable ZIP installers.
 
 ## 6. Review before upload
 

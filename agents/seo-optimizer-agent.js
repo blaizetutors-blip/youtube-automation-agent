@@ -78,6 +78,7 @@ class SEOOptimizerAgent {
         hashtags,
         chapters,
         endScreen,
+        playlist: this.buildPlaylistMetadata(strategy),
         seoScore,
         metadata: {
           primaryKeyword: strategy.keywords[0],
@@ -98,6 +99,21 @@ class SEOOptimizerAgent {
       this.logger.error('Failed to optimize SEO:', error);
       throw error;
     }
+  }
+
+  buildPlaylistMetadata(strategy) {
+    const configuredTitle = String(process.env.YOUTUBE_PLAYLIST_TITLE || '').trim();
+    const topic = String(strategy.topic || 'Biology').replace(/\s+/g, ' ').trim();
+    const title = configuredTitle || (isBiologyMode()
+      ? `Blaize Biology: ${topic}`
+      : `${topic} Series`);
+    return {
+      title: title.slice(0, 150),
+      description: isBiologyMode()
+        ? `A structured Blaize Tutors lesson sequence on ${topic}, from first principles to exam application.`
+        : `A structured video series about ${topic}.`,
+      privacyStatus: process.env.YOUTUBE_PLAYLIST_PRIVACY || 'private'
+    };
   }
 
   async generateSEOWithAI(script, strategy) {

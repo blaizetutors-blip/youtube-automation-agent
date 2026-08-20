@@ -14,6 +14,7 @@ const { ProductionManagementAgent } = require('./agents/production-management-ag
 const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
 const { AnalyticsOptimizationAgent } = require('./agents/analytics-optimization-agent');
 const { DailyAutomation } = require('./schedules/daily-automation');
+const { GenerationJobManager } = require('./utils/generation-job-manager');
 const { version } = require('./package.json');
 const chalk = require('chalk');
 const { isBiologyMode, requiresHumanApproval } = require('./config/blaize-biology');
@@ -26,6 +27,7 @@ class YouTubeAutomationAgent {
     this.agents = {};
     this.app = express();
     this.isInitialized = false;
+    this.jobManager = null;
   }
 
   async initialize() {
@@ -53,6 +55,18 @@ class YouTubeAutomationAgent {
       this.logger.info('Initializing agents...');
       await this.initializeAgents();
 
+      // Persist and resume long-running generation work independently of HTTP clients.
+      this.jobManager = new GenerationJobManager(
+        this.db,
+        (request, reportProgress) => this.generateContent(
+          request.topic,
+          request.style,
+          request.length,
+          reportProgress
+        )
+      );
+      await this.jobManager.initialize();
+
       // Show which pipeline stages will run for real vs. be simulated
       await this.logCapabilitySummary();
       
@@ -61,7 +75,7 @@ class YouTubeAutomationAgent {
       
       // Initialize scheduler
       this.logger.info('Setting up automation scheduler...');
-      this.scheduler = new DailyAutomation(this.agents, this.db);
+      this.scheduler = new DailyAutomation(this.agents, this.db, this.jobManager);
       await this.scheduler.initialize();
       
       this.isInitialized = true;
@@ -228,10 +242,16 @@ class YouTubeAutomationAgent {
     
     // Health check
     this.app.get('/health', (req, res) => {
+      const textService = this.agents.scriptWriter?.aiTextService || this.agents.strategy?.aiTextService;
       res.json({
         status: 'healthy',
         initialized: this.isInitialized,
         agents: Object.keys(this.agents),
+        generationQueue: {
+          activeJobId: this.jobManager?.activeJobId || null,
+          pending: this.jobManager?.pending?.size || 0
+        },
+        aiProviders: textService?.getHealthSnapshot?.() || [],
         uptime: process.uptime(),
         timestamp: new Date().toISOString()
       });
@@ -245,11 +265,44 @@ class YouTubeAutomationAgent {
           return res.status(validation.status).json({ success: false, error: validation.error });
         }
 
-        const { topic, style, length } = validation.value;
-        const result = await this.generateContent(topic, style, length);
-        res.json({ success: true, result });
+        const job = await this.jobManager.createJob(validation.value);
+        res.status(202).json({
+          success: true,
+          job,
+          statusUrl: `/jobs/${job.id}`
+        });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Durable generation status. A job continues even when the requesting shell disconnects.
+    this.app.get('/jobs', this.requireAPIKey(), async (req, res) => {
+      try {
+        const jobs = await this.db.getGenerationJobs({ limit: req.query.limit || 20 });
+        res.json({ success: true, jobs });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.get('/jobs/:jobId', this.requireAPIKey(), async (req, res) => {
+      try {
+        const job = await this.db.getGenerationJob(req.params.jobId);
+        if (!job) return res.status(404).json({ success: false, error: 'Generation job not found' });
+        return res.json({ success: true, job });
+      } catch (error) {
+        return res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.post('/jobs/:jobId/retry', this.requireAPIKey(), async (req, res) => {
+      try {
+        const job = await this.jobManager.retryJob(req.params.jobId);
+        if (!job) return res.status(404).json({ success: false, error: 'Generation job not found' });
+        return res.status(202).json({ success: true, job });
+      } catch (error) {
+        return res.status(500).json({ success: false, error: error.message });
       }
     });
 
@@ -304,16 +357,24 @@ class YouTubeAutomationAgent {
     });
   }
 
-  async generateContent(topic = null, style = null, length = 'medium') {
+  async generateContent(topic = null, style = null, length = 'medium', reportProgress = null) {
+    const report = async (stage, progress, message) => {
+      if (typeof reportProgress === 'function') {
+        await reportProgress({ stage, progress, message });
+      }
+    };
     this.logger.info('Starting content generation pipeline...');
+    await report('strategy', 5, 'Brainstorming and validating the lesson strategy');
     
     // Step 1: Strategy
     const strategy = await this.agents.strategy.generateContentStrategy(topic);
     this.logger.info(`Strategy generated: ${strategy.topic}`);
+    await report('scripting', 20, 'Writing and validating the seven-part Biology lesson');
     
     // Step 2: Script Writing
     const script = await this.agents.scriptWriter.generateScript(strategy);
     this.logger.info(`Script generated: ${script.title}`);
+    await report('review', 48, 'Running the automated Biology quality review');
 
     // Step 3: Biology review gate. An automated pass is advisory only;
     // human approval is still required before upload scheduling.
@@ -321,6 +382,7 @@ class YouTubeAutomationAgent {
     this.logger.info(`Automated Biology review: ${review.automatedVerdict}`);
     const biologyReviewFailed = isBiologyMode() && review.automatedVerdict !== 'pass';
     if (review.automatedVerdict === 'block' || biologyReviewFailed) {
+      await report('review_blocked', 100, 'The lesson was held for human review corrections');
       return {
         contentId: null,
         title: script.title,
@@ -328,14 +390,17 @@ class YouTubeAutomationAgent {
         review
       };
     }
+    await report('thumbnail', 56, 'Designing the branded lesson thumbnail');
     
     // Step 4: Thumbnail Design
     const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
     this.logger.info('Thumbnail generated');
+    await report('seo', 64, 'Preparing titles, metadata, chapters and playlist signals');
     
     // Step 5: SEO Optimization
     const seoData = await this.agents.seoOptimizer.optimize(script, strategy);
     this.logger.info('SEO optimization complete');
+    await report('rendering', 72, 'Rendering visuals, narration, captions and final video');
     
     // Step 6: Production Management
     const productionData = await this.agents.production.processContent({
@@ -346,6 +411,7 @@ class YouTubeAutomationAgent {
       review
     });
     this.logger.info('Production processing complete');
+    await report('saving', 92, 'Saving production assets and review metadata');
 
     // Step 7: Save to database
     const contentId = await this.db.saveProductionData(productionData);
@@ -356,6 +422,7 @@ class YouTubeAutomationAgent {
     if (scheduleEntry) {
       this.logger.info(`Content queued for publishing at ${scheduleEntry.publishTime}`);
     }
+    await report('completed', 100, 'Generation completed and held for human approval');
 
     return {
       contentId,

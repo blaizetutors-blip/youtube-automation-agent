@@ -1,5 +1,17 @@
 # YouTube Automation Agent
 
+## What's New in v3.3
+
+- **Provider outages no longer destroy a lesson run** — Gemini capacity failures rotate across configured Gemini models and then independent text providers. A circuit breaker avoids hammering an unhealthy route.
+- **Generation is now a durable background job** — `POST /generate` returns a job ID immediately. Progress, retries and results are stored in SQLite; interrupted work resumes after a laptop or server restart.
+- **Validated Biology checkpoints are reused** — quota or service outages do not discard completed, quality-checked script sections.
+- **Real topic playlist management** — successful uploads are added to a matching private YouTube playlist, created automatically when needed.
+- **Media fallback chains** — narration and supplemental-image generation move to the next configured provider when the preferred service fails.
+
+### Known dependency-audit residual risk
+
+The v3.3 safe dependency refresh leaves 10 production audit findings (2 low, 2 moderate, 5 high and 1 critical). The highest-severity paths are inherited by SQLite 5's native build toolchain and Sharp's bundled image stack; resolving them requires breaking major-version upgrades that need separate Windows and rendering validation. Do not install this project or replacement packages from untrusted forks or archives. The runtime resilience changes in this release do not remove this supply-chain risk.
+
 ## What's New in v2.4
 
 - **Guided walkthrough for first-time setup** — `npm run walkthrough` (also offered when you run `npm run setup`). It explains every choice in plain English, shows exactly where to get each key (and opens the page in your browser), **live-tests keys the moment you paste them**, walks you click-by-click through Google Cloud for the YouTube connection, and signs you in via your browser instead of copy-pasting auth codes. Every step is skippable and progress is saved — re-run it any time.
@@ -92,7 +104,8 @@ All OpenAI-compatible providers work out of the box — the system auto-configur
 graph LR
     subgraph Direct
         OA[OpenAI<br/>GPT-5.5]
-        GM[Gemini<br/>3.5 Flash/Pro]
+        GM[Gemini<br/>Flash/Pro]
+        GQ[Groq<br/>Llama/GPT-OSS]
         KM[Kimi<br/>K2.6]
         MM[MiMo<br/>V2.5 Pro]
         GL[GLM<br/>GLM-5]
@@ -109,6 +122,7 @@ graph LR
 | **OpenAI** | GPT-5.5, GPT-5.5 Instant | `api.openai.com/v1` | ~$0.05–0.20/video |
 | **OpenRouter** | 300+ (GPT, Claude, Gemini, Kimi, GLM, etc.) | `openrouter.ai/api/v1` | varies by model |
 | **Google Gemini** | Gemini 3.5 Flash, 3.5 Pro | via `@google/genai` SDK | free tier available |
+| **Groq** | Llama 3.3 70B, GPT-OSS | `api.groq.com/openai/v1` | free/paid limits vary |
 | **Kimi (Moonshot AI)** | Kimi K2.6, K2.5 | `api.moonshot.ai/v1` | ~80% cheaper than GPT-5.5 |
 | **MiMo (Xiaomi)** | MiMo V2.5 Pro, V2.5 | `api.xiaomimimo.com/v1` | competitive |
 | **GLM (Zhipu AI)** | GLM-5, GLM-5.1 | `api.z.ai/api/paas/v4/` | ~$1/M input tokens |
@@ -165,7 +179,7 @@ Already know what you're doing? `npm run setup` offers a classic quick mode, and
 - Node.js 18+
 - FFmpeg — bundled automatically via `ffmpeg-static` on `npm install`; a system install on your PATH or an `FFMPEG_PATH` env var takes precedence
 - Google account (YouTube Data API — free)
-- At least one AI provider key (OpenAI, Gemini, OpenRouter, Kimi, MiMo, or GLM) — without one, agents fall back to template-based generation
+- At least one AI provider key (Gemini, Groq, OpenAI, OpenRouter, Kimi, MiMo, or GLM). Blaize Biology mode deliberately refuses generic template scripts.
 - Images and narration come from your AI key: OpenAI **or Gemini** both cover image generation and TTS (ElevenLabs / Azure Speech optional for premium voices) — with no media provider at all you get gradient slides and silent video
 
 ## Configuration
@@ -194,6 +208,12 @@ Already know what you're doing? `npm run setup` offers a classic quick mode, and
 1. Get a key from [Google AI Studio](https://aistudio.google.com/)
 2. Set `GEMINI_API_KEY` in `.env`
 
+#### Groq (independent text fallback)
+
+1. Get a key from [Groq Console](https://console.groq.com/keys)
+2. Set `GROQ_API_KEY` in `.env`
+3. Keep Gemini or OpenAI configured for images and narration
+
 #### Kimi / MiMo / GLM
 
 | Provider | Get key at | Env var |
@@ -209,6 +229,8 @@ Already know what you're doing? `npm run setup` offers a classic quick mode, and
 OPENAI_API_KEY=sk-...
 # OPENROUTER_API_KEY=sk-or-...
 # GEMINI_API_KEY=...
+# GROQ_API_KEY=...
+# AI_PROVIDER_ORDER=gemini,groq,openai,openrouter,kimi,mimo,glm
 # MOONSHOT_API_KEY=...
 # MIMO_API_KEY=...
 # GLM_API_KEY=...
@@ -259,11 +281,17 @@ The scheduler runs automatically after `npm start`. Content generation at 06:00,
 # health check
 curl http://localhost:3456/health
 
-# generate a video on demand (send x-api-key if API_KEY is set in .env)
+# Queue a durable video job (returns HTTP 202 immediately)
 curl -X POST http://localhost:3456/generate \
   -H "Content-Type: application/json" \
   -H "x-api-key: $API_KEY" \
   -d '{"topic": "Top 10 Life Hacks", "style": "list"}'
+
+# Poll the returned job ID; it continues if this shell closes
+curl -H "x-api-key: $API_KEY" http://localhost:3456/jobs/JOB_ID
+
+# List recent jobs
+curl -H "x-api-key: $API_KEY" http://localhost:3456/jobs
 
 # view schedule
 curl http://localhost:3456/schedule
@@ -282,12 +310,12 @@ flowchart LR
     subgraph TTS["Audio Generation"]
         direction TB
         EL[ElevenLabs v3] -.->|fallback| OA[OpenAI TTS]
-        OA -.->|fallback| SIM1[Simulation]
+        OA -.->|fallback| GM[Gemini TTS]
     end
 
     subgraph IMG["Image Generation"]
         direction TB
-        GPT[GPT Image 2] -.->|fallback| SIM2[Simulation]
+        GPT[GPT Image 2] -.->|fallback| GI[Gemini Image]
     end
 
     subgraph VID["Video Assembly"]
@@ -302,7 +330,7 @@ flowchart LR
     MIX --> OUT[Final Video]
 ```
 
-Each stage has graceful fallbacks. If a paid API key isn't configured, the system simulates that step so the rest of the pipeline still runs.
+Provider-backed stages fail over when alternatives are configured. Blaize Biology production requires real narration, accurate 3D scene specifications and a playable MP4; simulated assets are never uploaded.
 
 ## Extending
 

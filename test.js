@@ -25,6 +25,9 @@ class SystemTest {
       { name: 'FFmpeg Resolution', test: () => this.testFFmpegResolution() },
       { name: 'Gemini Media Provider Selection', test: () => this.testGeminiMediaProvider() },
       { name: 'Structured AI Generation Resilience', test: () => this.testStructuredAIGeneration() },
+      { name: 'Cross-Provider Circuit Breaker', test: () => this.testCrossProviderFailover() },
+      { name: 'Durable Generation Job Recovery', test: () => this.testGenerationJobRecovery() },
+      { name: 'YouTube Playlist Organization', test: () => this.testPlaylistOrganization() },
       { name: 'Markup Rendering Safety', test: () => this.testMarkupRenderingSafety() },
       { name: 'Slideshow Renderer', test: () => this.testSlideshowRenderer() },
       { name: 'Evergreen Template Topics', test: () => this.testEvergreenTopics() },
@@ -226,6 +229,51 @@ class SystemTest {
 
     if (!acceptedNextCalled || acceptedResponse.statusCode) {
       throw new Error('Valid API key was not accepted');
+    }
+
+    const apiAgent = new YouTubeAutomationAgent();
+    const queuedJob = {
+      id: 'job-api-test',
+      status: 'queued',
+      stage: 'queued',
+      progress: 0,
+      request: { topic: 'Cell transport', style: 'explainer', length: 'medium' }
+    };
+    apiAgent.jobManager = {
+      activeJobId: null,
+      pending: new Set(),
+      createJob: async () => queuedJob,
+      retryJob: async () => queuedJob
+    };
+    apiAgent.db = {
+      getGenerationJobs: async () => [queuedJob],
+      getGenerationJob: async id => id === queuedJob.id ? queuedJob : null
+    };
+    apiAgent.setupAPI();
+    const server = await new Promise(resolve => {
+      const listener = apiAgent.app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    try {
+      const address = server.address();
+      const response = await globalThis.fetch(`http://127.0.0.1:${address.port}/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'test-secret' },
+        body: JSON.stringify({ topic: 'Cell transport', style: 'explainer' })
+      });
+      const payload = await response.json();
+      if (response.status !== 202 || payload.job?.id !== queuedJob.id) {
+        throw new Error('POST /generate did not return an immediate durable job response');
+      }
+      const statusResponse = await globalThis.fetch(
+        `http://127.0.0.1:${address.port}/jobs/${queuedJob.id}`,
+        { headers: { 'x-api-key': 'test-secret' } }
+      );
+      const statusPayload = await statusResponse.json();
+      if (statusResponse.status !== 200 || statusPayload.job?.status !== 'queued') {
+        throw new Error('GET /jobs/:jobId did not return persisted status');
+      }
+    } finally {
+      await new Promise(resolve => server.close(resolve));
     }
 
     if (previousKey === undefined) {
@@ -522,6 +570,26 @@ class SystemTest {
       });
       if (pcm.toString() !== 'pcm' || ttsCalls !== 2) {
         throw new Error('Transient Gemini TTS failure was not retried successfully');
+      }
+
+      const mediaFallback = new AIVideoGenerator({});
+      mediaFallback.openai = {};
+      mediaFallback.gemini = {};
+      let openAITTSCalls = 0;
+      let geminiTTSCalls = 0;
+      mediaFallback.generateOpenAITTS = async () => {
+        openAITTSCalls++;
+        const error = new Error('503 OpenAI unavailable');
+        error.status = 503;
+        throw error;
+      };
+      mediaFallback.generateGeminiTTS = async (_text, outputPath) => {
+        geminiTTSCalls++;
+        return outputPath;
+      };
+      const fallbackAudio = await mediaFallback.generateTTSAudio('Cells cooperate.', 'fallback.mp3');
+      if (fallbackAudio !== 'fallback.mp3' || openAITTSCalls !== 1 || geminiTTSCalls !== 1) {
+        throw new Error('TTS did not fail over to the next configured media provider');
       }
 
       const none = new AIVideoGenerator({});
@@ -967,6 +1035,175 @@ class SystemTest {
     }
 
     this.logger.info('Structured AI generation resilience test completed successfully');
+  }
+
+  async testCrossProviderFailover() {
+    const { AITextService } = require('./utils/ai-text-service');
+    const previousFallbacks = process.env.GEMINI_FALLBACK_MODELS;
+    const previousTransientRetries = process.env.GEMINI_TRANSIENT_RETRIES_PER_MODEL;
+    const model = `test-capacity-${Date.now()}`;
+    let geminiCalls = 0;
+    let fallbackCalls = 0;
+    try {
+      process.env.GEMINI_FALLBACK_MODELS = model;
+      process.env.GEMINI_TRANSIENT_RETRIES_PER_MODEL = '0';
+      const service = new AITextService({});
+      service.sleep = async () => {};
+      service.waitForGeminiRequestSlot = async () => {};
+      service.providerRoutes = [
+        {
+          id: `test-gemini-${Date.now()}`,
+          kind: 'gemini',
+          name: 'Test Gemini',
+          model,
+          client: {
+            models: {
+              generateContent: async () => {
+                geminiCalls++;
+                const error = new Error('503 high demand');
+                error.status = 503;
+                throw error;
+              }
+            }
+          }
+        },
+        {
+          id: `test-fallback-${Date.now()}`,
+          kind: 'openai-compatible',
+          name: 'Test Independent Fallback',
+          model: 'test-model',
+          client: {
+            chat: {
+              completions: {
+                create: async () => {
+                  fallbackCalls++;
+                  return { choices: [{ message: { content: '{"fallback":true}' } }] };
+                }
+              }
+            }
+          }
+        }
+      ];
+      service.model = model;
+      service.providerName = 'Test Gemini';
+
+      const first = await service.generateText('Return JSON', { retries: 0 });
+      const second = await service.generateText('Return JSON again', { retries: 0 });
+      if (first !== '{"fallback":true}' || second !== '{"fallback":true}') {
+        throw new Error('Independent fallback did not return the provider response');
+      }
+      if (geminiCalls !== 1 || fallbackCalls !== 2) {
+        throw new Error('Circuit breaker did not bypass the overloaded provider on the next request');
+      }
+      const health = service.getHealthSnapshot();
+      if (health[0]?.status !== 'cooldown' || health[1]?.lastUsed === null) {
+        throw new Error('Provider health did not expose cooldown and last-used state');
+      }
+    } finally {
+      if (previousFallbacks === undefined) delete process.env.GEMINI_FALLBACK_MODELS;
+      else process.env.GEMINI_FALLBACK_MODELS = previousFallbacks;
+      if (previousTransientRetries === undefined) delete process.env.GEMINI_TRANSIENT_RETRIES_PER_MODEL;
+      else process.env.GEMINI_TRANSIENT_RETRIES_PER_MODEL = previousTransientRetries;
+    }
+    this.logger.info('Cross-provider circuit breaker test completed successfully');
+  }
+
+  async testGenerationJobRecovery() {
+    const fs = require('fs').promises;
+    const os = require('os');
+    const { GenerationJobManager } = require('./utils/generation-job-manager');
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-jobs-'));
+    const db = new Database();
+    db.dbPath = path.join(dir, 'jobs.db');
+    const previousBase = process.env.GENERATION_JOB_RETRY_BASE_MS;
+    try {
+      process.env.GENERATION_JOB_RETRY_BASE_MS = '1000';
+      await db.initialize();
+      const job = await db.createGenerationJob({ topic: 'Cell transport', source: 'test' });
+      const failingManager = new GenerationJobManager(db, async () => {
+        const error = new Error('503 high demand');
+        error.status = 503;
+        throw error;
+      }, { maxRetries: 2 });
+      await failingManager.processJob(job.id);
+      const waiting = await db.getGenerationJob(job.id);
+      if (waiting.status !== 'retry_wait' || waiting.retryCount !== 1 || !waiting.nextAttemptAt) {
+        throw new Error('Retryable work was not persisted in retry_wait state');
+      }
+      failingManager.shutdown();
+
+      await db.updateGenerationJob(job.id, {
+        status: 'running',
+        stage: 'scripting',
+        nextAttemptAt: null
+      });
+      let resumed = false;
+      const recoveryManager = new GenerationJobManager(db, async (_request, report) => {
+        resumed = true;
+        await report({ stage: 'rendering', progress: 75, message: 'Resumed after restart' });
+        return { status: 'ready', contentId: 'prod-test' };
+      });
+      await recoveryManager.initialize();
+
+      const deadline = Date.now() + 2000;
+      let recovered;
+      do {
+        recovered = await db.getGenerationJob(job.id);
+        if (recovered.status === 'completed') break;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      } while (Date.now() < deadline);
+      recoveryManager.shutdown();
+
+      if (!resumed || recovered.status !== 'completed' || recovered.result?.contentId !== 'prod-test') {
+        throw new Error('Interrupted generation job was not resumed and completed');
+      }
+    } finally {
+      if (previousBase === undefined) delete process.env.GENERATION_JOB_RETRY_BASE_MS;
+      else process.env.GENERATION_JOB_RETRY_BASE_MS = previousBase;
+      await db.close().catch(() => {});
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+    this.logger.info('Durable generation job recovery test completed successfully');
+  }
+
+  async testPlaylistOrganization() {
+    const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
+    const agent = new PublishingSchedulingAgent({}, {});
+    let playlistCreated = 0;
+    let itemInserted = 0;
+    agent.youtube = {
+      playlists: {
+        list: async () => ({ data: { items: [] } }),
+        insert: async request => {
+          playlistCreated++;
+          return {
+            data: {
+              id: 'playlist-1',
+              snippet: { title: request.requestBody.snippet.title }
+            }
+          };
+        }
+      },
+      playlistItems: {
+        list: async () => ({ data: { items: [] } }),
+        insert: async request => {
+          itemInserted++;
+          if (request.requestBody.snippet.resourceId.videoId !== 'video-1') {
+            throw new Error('Wrong video was inserted into the playlist');
+          }
+          return { data: { id: 'item-1' } };
+        }
+      }
+    };
+    const result = await agent.organizeIntoPlaylist('video-1', {
+      title: 'Blaize Biology: Cell Structure',
+      description: 'Structured cell lessons',
+      privacyStatus: 'private'
+    });
+    if (result?.id !== 'playlist-1' || playlistCreated !== 1 || itemInserted !== 1) {
+      throw new Error('Topic playlist was not created and populated');
+    }
+    this.logger.info('YouTube playlist organization test completed successfully');
   }
 
   async testMarkupRenderingSafety() {

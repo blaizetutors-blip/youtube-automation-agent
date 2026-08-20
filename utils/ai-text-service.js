@@ -2,9 +2,12 @@ const OpenAI = require('openai');
 const { Logger } = require('./logger');
 
 const geminiRequestTimesByModel = new Map();
-const geminiDailyExhaustedModels = new Set();
-const geminiUnavailableModels = new Set();
+const geminiDailyUnavailableUntil = new Map();
+const geminiUnavailableUntil = new Map();
+const providerUnavailableUntil = new Map();
 const GEMINI_RATE_WINDOW_MS = 60000;
+const DEFAULT_CIRCUIT_BREAKER_MS = 15 * 60 * 1000;
+const MODEL_ACCESS_FAILURE_MS = 24 * 60 * 60 * 1000;
 
 const PROVIDERS = {
   openai: {
@@ -20,6 +23,13 @@ const PROVIDERS = {
     defaultModel: 'openai/gpt-5.5',
     models: ['openai/gpt-5.5', 'anthropic/claude-opus-4-8', 'google/gemini-3.5-flash', 'moonshotai/kimi-k2.6', 'zhipu/glm-5'],
     envKey: 'OPENROUTER_API_KEY',
+  },
+  groq: {
+    name: 'Groq',
+    baseURL: 'https://api.groq.com/openai/v1',
+    defaultModel: 'llama-3.3-70b-versatile',
+    models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+    envKey: 'GROQ_API_KEY',
   },
   kimi: {
     name: 'Kimi (Moonshot AI)',
@@ -51,32 +61,87 @@ class AITextService {
     this.gemini = null;
     this.model = null;
     this.providerName = null;
+    this.providerRoutes = [];
+    this.lastProviderUsed = null;
 
     this._init(credentials);
   }
 
   _init(credentials) {
-    const provider = credentials.aiProvider?.provider;
-    const apiKey = credentials.aiProvider?.apiKey;
-    const model = credentials.aiProvider?.model;
+    const registered = new Set();
+    const registerOpenAICompatible = (provider, apiKey, model) => {
+      if (!PROVIDERS[provider] || !apiKey || registered.has(provider)) return;
+      const preset = PROVIDERS[provider];
+      this.providerRoutes.push({
+        id: provider,
+        kind: 'openai-compatible',
+        name: preset.name,
+        model: model || preset.defaultModel,
+        client: new OpenAI({ apiKey, baseURL: preset.baseURL })
+      });
+      registered.add(provider);
+    };
+    const registerGemini = (apiKey, model) => {
+      if (!apiKey || registered.has('gemini')) return;
+      try {
+        const { GoogleGenAI } = require('@google/genai');
+        this.providerRoutes.push({
+          id: 'gemini',
+          kind: 'gemini',
+          name: 'Google Gemini',
+          model: model || 'gemini-3.7-flash',
+          client: new GoogleGenAI({ apiKey })
+        });
+        registered.add('gemini');
+      } catch (error) {
+        this.logger.error('Failed to initialize Gemini:', error.message);
+      }
+    };
 
-    if (provider && PROVIDERS[provider] && apiKey) {
-      return this._initOpenAICompatible(PROVIDERS[provider], apiKey, model);
+    const selectedProvider = credentials.aiProvider?.provider;
+    if (selectedProvider && PROVIDERS[selectedProvider] && credentials.aiProvider?.apiKey) {
+      registerOpenAICompatible(
+        selectedProvider,
+        credentials.aiProvider.apiKey,
+        credentials.aiProvider.model
+      );
+    }
+    if (selectedProvider === 'gemini' && credentials.aiProvider?.apiKey) {
+      registerGemini(credentials.aiProvider.apiKey, credentials.aiProvider.model);
     }
 
-    for (const [, preset] of Object.entries(PROVIDERS)) {
-      const key = process.env[preset.envKey];
-      if (key) {
-        return this._initOpenAICompatible(preset, key);
+    if (credentials.gemini?.apiKey) {
+      registerGemini(credentials.gemini.apiKey, credentials.gemini.model);
+    }
+    if (credentials.openai?.apiKey) {
+      registerOpenAICompatible('openai', credentials.openai.apiKey, credentials.openai.model);
+    }
+
+    const configuredOrder = String(
+      process.env.AI_PROVIDER_ORDER || 'gemini,groq,openai,openrouter,kimi,mimo,glm'
+    ).split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
+    for (const provider of configuredOrder) {
+      if (provider === 'gemini') {
+        registerGemini(process.env.GEMINI_API_KEY);
+      } else if (PROVIDERS[provider]) {
+        registerOpenAICompatible(provider, process.env[PROVIDERS[provider].envKey]);
       }
     }
-
-    const geminiKey = credentials.gemini?.apiKey || process.env.GEMINI_API_KEY;
-    if (geminiKey) {
-      return this._initGemini(geminiKey, credentials.gemini?.model);
+    for (const [provider, preset] of Object.entries(PROVIDERS)) {
+      registerOpenAICompatible(provider, process.env[preset.envKey]);
     }
 
-    this.logger.warn('No AI text provider configured — text generation unavailable');
+    const primary = this.providerRoutes[0];
+    if (!primary) {
+      this.logger.warn('No AI text provider configured — text generation unavailable');
+      return;
+    }
+    this.model = primary.model;
+    this.providerName = primary.name;
+    if (primary.kind === 'gemini') this.gemini = primary.client;
+    else this.client = primary.client;
+    const routeSummary = this.providerRoutes.map(route => `${route.name}:${route.model}`).join(' -> ');
+    this.logger.info(`AI provider route initialized (${routeSummary})`);
   }
 
   _initOpenAICompatible(preset, apiKey, model) {
@@ -107,7 +172,7 @@ class AITextService {
         return await this.generateTextOnce(prompt, options);
       } catch (error) {
         lastError = error;
-        if (attempt >= retries || !this.isRetryableError(error)) {
+        if (attempt >= retries || !this.shouldRetryInline(error)) {
           throw error;
         }
 
@@ -175,63 +240,178 @@ class AITextService {
     const model = options.model || this.model;
     const maxTokens = options.maxTokens || 2048;
     const temperature = options.temperature ?? 0.7;
+    const routes = this.getProviderRoutes(model);
+    if (routes.length === 0) throw new Error('No AI text provider configured');
 
-    if (this.gemini) {
-      let lastError;
-      const candidates = this.getGeminiModelCandidates(model);
-      for (const candidate of candidates) {
-        if (geminiDailyExhaustedModels.has(candidate) || geminiUnavailableModels.has(candidate)) continue;
-        try {
-          return await this.generateGeminiTextOnce(prompt, candidate, maxTokens, temperature, options);
-        } catch (error) {
-          lastError = error;
-          const dailyQuota = this.isDailyQuotaError(error);
-          const unavailableModel = this.isGeminiModelUnavailableError(error);
-          if (!dailyQuota && !unavailableModel) throw error;
+    let lastError;
+    let soonestRetryAt = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < routes.length; index++) {
+      const route = routes[index];
+      const blockedUntil = providerUnavailableUntil.get(route.id) || 0;
+      if (blockedUntil > Date.now()) {
+        soonestRetryAt = Math.min(soonestRetryAt, blockedUntil);
+        continue;
+      }
+      providerUnavailableUntil.delete(route.id);
 
-          if (dailyQuota) geminiDailyExhaustedModels.add(candidate);
-          if (unavailableModel) geminiUnavailableModels.add(candidate);
-          const nextModel = candidates.find(item =>
-            !geminiDailyExhaustedModels.has(item) && !geminiUnavailableModels.has(item)
-          );
-          if (nextModel) {
-            this.logger.warn(
-              dailyQuota
-                ? `Gemini daily quota exhausted for ${candidate}; switching this job to ${nextModel}`
-                : `Gemini model ${candidate} is unavailable for this project; switching this job to ${nextModel}`
-            );
-          }
+      try {
+        const result = route.kind === 'gemini'
+          ? await this.generateWithGeminiRoute(prompt, route, maxTokens, temperature, options)
+          : await this.generateOpenAICompatibleTextOnce(prompt, route, maxTokens, temperature);
+        this.lastProviderUsed = { provider: route.name, model: route.model, at: new Date().toISOString() };
+        this.providerName = route.name;
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (!this.isRetryableError(error)) throw error;
+        const retryAt = Date.now() + Math.max(
+          this.getProviderCooldownMs(error),
+          Number(error.retryAfterMs || 0)
+        );
+        providerUnavailableUntil.set(route.id, retryAt);
+        soonestRetryAt = Math.min(soonestRetryAt, retryAt);
+        const nextRoute = routes.slice(index + 1).find(candidate =>
+          (providerUnavailableUntil.get(candidate.id) || 0) <= Date.now()
+        );
+        if (nextRoute) {
+          this.logger.warn(`${route.name} is unavailable; switching this request to ${nextRoute.name}`);
         }
       }
+    }
 
-      if (lastError) throw lastError;
-      if (candidates.every(candidate => geminiDailyExhaustedModels.has(candidate))) {
-        const quotaError = new Error(
-          'All configured Gemini models have exhausted their daily request quotas. ' +
-          'The validated checkpoint is preserved; quotas reset at midnight Pacific time.'
+    const error = lastError || new Error('All configured AI providers are temporarily unavailable');
+    error.code = error.code || 'AI_PROVIDERS_TEMPORARILY_UNAVAILABLE';
+    if (Number.isFinite(soonestRetryAt)) {
+      error.retryAfterMs = Math.max(1000, soonestRetryAt - Date.now());
+    }
+    throw error;
+  }
+
+  getProviderRoutes(modelOverride) {
+    if (this.providerRoutes.length > 0) {
+      return this.providerRoutes.map((route, index) => ({
+        ...route,
+        model: index === 0 && modelOverride ? modelOverride : route.model
+      }));
+    }
+    if (this.gemini) {
+      return [{
+        id: 'gemini', kind: 'gemini', name: this.providerName || 'Google Gemini',
+        model: modelOverride || this.model, client: this.gemini
+      }];
+    }
+    if (this.client) {
+      return [{
+        id: 'primary', kind: 'openai-compatible', name: this.providerName || 'AI provider',
+        model: modelOverride || this.model, client: this.client
+      }];
+    }
+    return [];
+  }
+
+  async generateWithGeminiRoute(prompt, route, maxTokens, temperature, options) {
+    const originalClient = this.gemini;
+    this.gemini = route.client;
+    let lastError;
+    let soonestRetryAt = Number.POSITIVE_INFINITY;
+    const candidates = this.getGeminiModelCandidates(route.model);
+    try {
+      for (const candidate of candidates) {
+        const blockedUntil = Math.max(
+          geminiDailyUnavailableUntil.get(candidate) || 0,
+          geminiUnavailableUntil.get(candidate) || 0
         );
-        quotaError.status = 429;
-        quotaError.code = 'GEMINI_DAILY_QUOTA_EXHAUSTED';
-        throw quotaError;
+        if (blockedUntil > Date.now()) {
+          soonestRetryAt = Math.min(soonestRetryAt, blockedUntil);
+          continue;
+        }
+        geminiDailyUnavailableUntil.delete(candidate);
+        geminiUnavailableUntil.delete(candidate);
+
+        const transientRetries = Math.max(
+          0,
+          Number.parseInt(process.env.GEMINI_TRANSIENT_RETRIES_PER_MODEL || '1', 10) || 0
+        );
+        for (let attempt = 0; attempt <= transientRetries; attempt++) {
+          try {
+            const result = await this.generateGeminiTextOnce(
+              prompt, candidate, maxTokens, temperature, options
+            );
+            route.model = candidate;
+            return result;
+          } catch (error) {
+            lastError = error;
+            if (this.isDailyQuotaError(error)) {
+              const retryAt = this.getNextPacificMidnight();
+              geminiDailyUnavailableUntil.set(candidate, retryAt);
+              soonestRetryAt = Math.min(soonestRetryAt, retryAt);
+              break;
+            }
+            if (this.isGeminiModelUnavailableError(error)) {
+              const retryAt = Date.now() + MODEL_ACCESS_FAILURE_MS;
+              geminiUnavailableUntil.set(candidate, retryAt);
+              soonestRetryAt = Math.min(soonestRetryAt, retryAt);
+              break;
+            }
+            if (!this.isGeminiTransientCapacityError(error)) throw error;
+            if (attempt < transientRetries) {
+              const delayMs = this.getRetryDelayMs(error, attempt);
+              this.logger.warn(
+                `Gemini ${candidate} is at capacity; retrying once in ${delayMs / 1000}s`
+              );
+              await this.sleep(delayMs);
+              continue;
+            }
+            const retryAt = Date.now() + this.getProviderCooldownMs(error);
+            geminiUnavailableUntil.set(candidate, retryAt);
+            soonestRetryAt = Math.min(soonestRetryAt, retryAt);
+          }
+        }
+
+        const nextModel = candidates.find(item => {
+          const unavailableUntil = Math.max(
+            geminiDailyUnavailableUntil.get(item) || 0,
+            geminiUnavailableUntil.get(item) || 0
+          );
+          return item !== candidate && unavailableUntil <= Date.now();
+        });
+        if (nextModel) {
+          this.logger.warn(`Gemini ${candidate} is unavailable; switching this request to ${nextModel}`);
+        }
       }
-      const unavailableError = new Error(
-        'No configured Gemini fallback model is available to this project. The validated checkpoint is preserved.'
+    } finally {
+      this.gemini = originalClient;
+    }
+
+    const allDaily = candidates.every(candidate =>
+      (geminiDailyUnavailableUntil.get(candidate) || 0) > Date.now()
+    );
+    if (allDaily) {
+      const quotaError = new Error(
+        'All configured Gemini models have exhausted their daily request quotas. ' +
+        'The validated checkpoint is preserved and the job will resume after quota reset.'
       );
-      unavailableError.code = 'GEMINI_MODELS_UNAVAILABLE';
-      throw unavailableError;
+      quotaError.status = 429;
+      quotaError.code = 'GEMINI_DAILY_QUOTA_EXHAUSTED';
+      quotaError.retryAfterMs = Math.max(1000, this.getNextPacificMidnight() - Date.now());
+      throw quotaError;
     }
 
-    if (!this.client) {
-      throw new Error('No AI text provider configured');
+    const unavailableError = lastError || new Error('No configured Gemini model is currently available');
+    unavailableError.code = unavailableError.code || 'GEMINI_MODELS_UNAVAILABLE';
+    if (Number.isFinite(soonestRetryAt)) {
+      unavailableError.retryAfterMs = Math.max(1000, soonestRetryAt - Date.now());
     }
+    throw unavailableError;
+  }
 
-    const response = await this.client.chat.completions.create({
-      model,
+  async generateOpenAICompatibleTextOnce(prompt, route, maxTokens, temperature) {
+    const response = await route.client.chat.completions.create({
+      model: route.model,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: maxTokens,
       temperature,
     });
-
     return response.choices[0].message.content;
   }
 
@@ -303,7 +483,10 @@ class AITextService {
   }
 
   isRetryableError(error) {
-    if (this.isDailyQuotaError(error) || error?.code === 'GEMINI_MODELS_UNAVAILABLE') return false;
+    if (error?.code === 'AI_OUTPUT_TRUNCATED') return false;
+    if (['AI_PROVIDERS_TEMPORARILY_UNAVAILABLE', 'GEMINI_MODELS_UNAVAILABLE', 'GEMINI_DAILY_QUOTA_EXHAUSTED'].includes(error?.code)) {
+      return true;
+    }
     const status = error?.status || error?.code || error?.response?.status;
     if ([429, 500, 502, 503, 504].includes(Number(status))) {
       return true;
@@ -311,6 +494,19 @@ class AITextService {
 
     const message = String(error?.message || error || '');
     return /\b(?:429|500|502|503|504)\b|high demand|temporar(?:y|ily)|unavailable|resource exhausted|rate limit/i.test(message);
+  }
+
+  shouldRetryInline(error) {
+    // Aggregate failures have already exhausted every configured model/provider.
+    // The durable job queue owns their longer wait so HTTP clients never have to.
+    if ([
+      'AI_PROVIDERS_TEMPORARILY_UNAVAILABLE',
+      'GEMINI_MODELS_UNAVAILABLE',
+      'GEMINI_DAILY_QUOTA_EXHAUSTED'
+    ].includes(error?.code)) {
+      return false;
+    }
+    return this.isRetryableError(error);
   }
 
   isDailyQuotaError(error) {
@@ -324,6 +520,14 @@ class AITextService {
     const message = String(error?.message || error || '');
     return status === 404 ||
       ([400, 403].includes(status) && /model[\s\S]*(?:not found|not available|unsupported|does not exist|permission)/i.test(message));
+  }
+
+  isGeminiTransientCapacityError(error) {
+    if (this.isDailyQuotaError(error)) return false;
+    const status = Number(error?.status || error?.code || error?.response?.status);
+    const message = String(error?.message || error || '');
+    return [500, 502, 503, 504].includes(status) ||
+      /high demand|temporar(?:y|ily) unavailable|service unavailable|overloaded|at capacity/i.test(message);
   }
 
   getGeminiModelCandidates(primaryModel = this.model) {
@@ -343,6 +547,56 @@ class AITextService {
       return Math.min(60000, Math.ceil(Number(providerDelay[1]) * 1000) + 750);
     }
     return Math.min(8000, 1500 * (2 ** attempt));
+  }
+
+  getProviderCooldownMs(error) {
+    const configured = Number.parseInt(process.env.AI_PROVIDER_COOLDOWN_MS || '', 10);
+    const fallback = Number.isFinite(configured) && configured >= 1000
+      ? configured
+      : DEFAULT_CIRCUIT_BREAKER_MS;
+    const providerDelay = this.getRetryDelayMs(error, 0);
+    return Math.max(fallback, providerDelay);
+  }
+
+  getNextPacificMidnight(now = new Date()) {
+    const pacificDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(now);
+    const [year, month, day] = pacificDate.split('-').map(Number);
+    const targetDay = new Date(Date.UTC(year, month - 1, day + 1));
+    for (let hour = 7; hour <= 8; hour++) {
+      const candidate = new Date(Date.UTC(
+        targetDay.getUTCFullYear(), targetDay.getUTCMonth(), targetDay.getUTCDate(), hour
+      ));
+      const candidatePacificDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Los_Angeles',
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23'
+      }).formatToParts(candidate).reduce((parts, part) => {
+        parts[part.type] = part.value;
+        return parts;
+      }, {});
+      if (
+        Number(candidatePacificDate.year) === targetDay.getUTCFullYear() &&
+        Number(candidatePacificDate.month) === targetDay.getUTCMonth() + 1 &&
+        Number(candidatePacificDate.day) === targetDay.getUTCDate() &&
+        Number(candidatePacificDate.hour) === 0
+      ) return candidate.getTime();
+    }
+    return now.getTime() + 24 * 60 * 60 * 1000;
+  }
+
+  getHealthSnapshot() {
+    const now = Date.now();
+    return this.getProviderRoutes().map(route => ({
+      provider: route.name,
+      model: route.model,
+      status: (providerUnavailableUntil.get(route.id) || 0) > now ? 'cooldown' : 'available',
+      retryAt: (providerUnavailableUntil.get(route.id) || 0) > now
+        ? new Date(providerUnavailableUntil.get(route.id)).toISOString()
+        : null,
+      lastUsed: this.lastProviderUsed?.provider === route.name ? this.lastProviderUsed.at : null
+    }));
   }
 
   async waitForGeminiRequestSlot(model = this.model) {

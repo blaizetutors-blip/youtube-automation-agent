@@ -54,29 +54,34 @@ class AIVideoGenerator {
 
   async generateTTSAudio(text, outputPath) {
     this.logger.info('Generating TTS audio...');
-    
-    try {
-      // Try ElevenLabs first (higher quality)
-      if (this.elevenLabsApiKey && this.elevenLabsVoiceId) {
-        return await this.generateElevenLabsTTS(text, outputPath);
-      }
-      
-      // Fallback to OpenAI TTS
-      if (this.openai) {
-        return await this.generateOpenAITTS(text, outputPath);
-      }
 
-      // Fallback to Gemini native TTS (free tier)
-      if (this.gemini) {
-        return await this.generateGeminiTTS(text, outputPath);
-      }
+    const providers = [
+      this.elevenLabsApiKey && this.elevenLabsVoiceId
+        ? { name: 'ElevenLabs', run: () => this.generateElevenLabsTTS(text, outputPath) }
+        : null,
+      this.openai
+        ? { name: 'OpenAI', run: () => this.generateOpenAITTS(text, outputPath) }
+        : null,
+      this.gemini
+        ? { name: 'Gemini', run: () => this.generateGeminiTTS(text, outputPath) }
+        : null
+    ].filter(Boolean);
+    if (providers.length === 0) return this.simulateTTSGeneration(text, outputPath);
 
-      // Final fallback to simulation
-      return await this.simulateTTSGeneration(text, outputPath);
-    } catch (error) {
-      this.logger.error('TTS generation failed:', error);
-      throw error;
+    let lastError;
+    for (const provider of providers) {
+      try {
+        return await provider.run();
+      } catch (error) {
+        lastError = error;
+        const next = providers[providers.indexOf(provider) + 1];
+        if (next) {
+          this.logger.warn(`${provider.name} TTS failed; switching narration to ${next.name}: ${error.message}`);
+        }
+      }
     }
+    this.logger.error('All configured TTS providers failed:', lastError);
+    throw lastError;
   }
 
   async generateElevenLabsTTS(text, outputPath) {
@@ -296,15 +301,25 @@ class AIVideoGenerator {
   async generateImage(prompt, imagePath) {
     await fs.mkdir(path.dirname(imagePath), { recursive: true });
 
-    if (this.openai) {
-      return await this.generateOpenAIImage(prompt, imagePath);
-    }
+    const providers = [
+      this.openai ? { name: 'OpenAI', run: () => this.generateOpenAIImage(prompt, imagePath) } : null,
+      this.gemini ? { name: 'Gemini', run: () => this.generateGeminiImage(prompt, imagePath) } : null
+    ].filter(Boolean);
+    if (providers.length === 0) throw new Error('No image generation provider configured');
 
-    if (this.gemini) {
-      return await this.generateGeminiImage(prompt, imagePath);
+    let lastError;
+    for (const provider of providers) {
+      try {
+        return await provider.run();
+      } catch (error) {
+        lastError = error;
+        const next = providers[providers.indexOf(provider) + 1];
+        if (next) {
+          this.logger.warn(`${provider.name} image generation failed; switching to ${next.name}: ${error.message}`);
+        }
+      }
     }
-
-    throw new Error('No image generation provider configured');
+    throw lastError;
   }
 
   async generateOpenAIImage(prompt, imagePath) {
