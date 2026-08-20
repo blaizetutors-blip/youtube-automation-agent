@@ -175,13 +175,31 @@ class AITextService {
           config[key] = options[key];
         }
       }
+      if (options.thinkingBudget !== undefined || options.thinkingLevel !== undefined) {
+        config.thinkingConfig = {};
+        if (options.thinkingBudget !== undefined) {
+          config.thinkingConfig.thinkingBudget = options.thinkingBudget;
+        }
+        if (options.thinkingLevel !== undefined) {
+          config.thinkingConfig.thinkingLevel = options.thinkingLevel;
+        }
+      }
 
       const response = await this.gemini.models.generateContent({
         model,
         contents: prompt,
         config,
       });
-      return response.text;
+      const text = response.text;
+      const finishReason = response.candidates?.[0]?.finishReason;
+      if (finishReason === 'MAX_TOKENS') {
+        const error = new Error(
+          `Gemini output was truncated at the configured token limit (${String(text || '').length} characters returned)`
+        );
+        error.code = 'AI_OUTPUT_TRUNCATED';
+        throw error;
+      }
+      return text;
     }
 
     if (!this.client) {

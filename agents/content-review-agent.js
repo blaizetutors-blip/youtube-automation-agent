@@ -76,8 +76,9 @@ class ContentReviewAgent {
     if (this.aiTextService.isAvailable()) {
       try {
         const parsed = await this.aiTextService.generateJson(this.buildPrompt(strategy, script), {
-          maxTokens: 4096,
-          temperature: 0.1,
+          maxTokens: 8192,
+          temperature: 1,
+          thinkingBudget: 0,
           retries: 2,
           jsonRetries: 2,
           responseJsonSchema: REVIEW_RESPONSE_SCHEMA

@@ -50,6 +50,20 @@ const STRATEGY_RESPONSE_SCHEMA = {
   }
 };
 
+const BRAINSTORM_RESPONSE_SCHEMA = {
+  type: 'object',
+  required: [
+    'candidateAngles', 'selectedAngle', 'selectionRationale', 'coreQuestion', 'lessonPromise'
+  ],
+  properties: {
+    candidateAngles: { type: 'array', minItems: 3, items: { type: 'string' } },
+    selectedAngle: { type: 'string' },
+    selectionRationale: { type: 'string' },
+    coreQuestion: { type: 'string' },
+    lessonPromise: { type: 'string' }
+  }
+};
+
 class ContentStrategyAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -338,7 +352,28 @@ Plan at least five topic-specific visuals. Prefer labelled diagrams, causal/proc
 Choose one recurring format: CONCEPT LAB, EXAM CLINIC, PRACTICAL BIOLOGY, DATA CLINIC, COMMON MISTAKE or 60-SECOND REVISION.
 Avoid general trends, medical advice, sensationalism, fabricated syllabus wording and unsupported claims.`
       : '';
-    const prompt = `You are selecting a YouTube content strategy.
+    const brainstormPrompt = `Act as a senior Biology teacher, examiner and visual lesson producer.
+Brainstorm exactly three genuinely different, non-clickbait teaching angles for this lesson, then select the strongest one.
+Judge the angles by conceptual clarity, misconception repair, exam transfer, visual explanatory power and sustained learner attention.
+Return only JSON containing candidateAngles, selectedAngle, selectionRationale, coreQuestion and lessonPromise.
+
+Requested topic: ${requestedTopic || 'none'}
+Audience: ${CHANNEL_PROFILE.audience}
+Avoid generic hooks, decorative visuals, unsupported claims and fabricated syllabus wording.`;
+
+    try {
+      const brainstorm = isBiologyMode()
+        ? await this.aiTextService.generateJson(brainstormPrompt, {
+          maxTokens: 4096,
+          temperature: 1,
+          thinkingBudget: 0,
+          retries: 2,
+          jsonRetries: 2,
+          responseJsonSchema: BRAINSTORM_RESPONSE_SCHEMA
+        })
+        : null;
+
+      const prompt = `You are selecting a YouTube content strategy.
 Return only valid JSON with this exact shape:
 {
   "topic": "specific video topic",
@@ -363,12 +398,13 @@ Requested topic: ${requestedTopic || 'none'}
 Trending topics available: ${trendingTopics || 'Technology Trends'}
 Channel target audience: ${process.env.TARGET_AUDIENCE || (isBiologyMode() ? CHANNEL_PROFILE.audience : 'General audience interested in educational content')}
 ${biologyBrief}
+Teacher-editor brainstorm to preserve in the final blueprint: ${brainstorm ? JSON.stringify(brainstorm) : 'not applicable'}
 Avoid fabricated claims and unsupported numbers.`;
 
-    try {
       const parsed = await this.aiTextService.generateJson(prompt, {
-        maxTokens: 1800,
-        temperature: 0.5,
+        maxTokens: 8192,
+        temperature: 1,
+        thinkingBudget: 0,
         retries: 2,
         jsonRetries: 2,
         responseJsonSchema: STRATEGY_RESPONSE_SCHEMA
@@ -394,10 +430,10 @@ Avoid fabricated claims and unsupported numbers.`;
         bestPublishTime: this.calculateBestPublishTime(),
         competitorAnalysis: this.getCompetitorInsights(topic),
         seriesFormat: parsed.seriesFormat,
-        candidateAngles: parsed.candidateAngles,
-        selectionRationale: parsed.selectionRationale,
-        coreQuestion: parsed.coreQuestion,
-        lessonPromise: parsed.lessonPromise,
+        candidateAngles: parsed.candidateAngles || brainstorm?.candidateAngles,
+        selectionRationale: parsed.selectionRationale || brainstorm?.selectionRationale,
+        coreQuestion: parsed.coreQuestion || brainstorm?.coreQuestion,
+        lessonPromise: parsed.lessonPromise || brainstorm?.lessonPromise,
         learningObjectives: parsed.learningObjectives,
         prerequisiteKnowledge: parsed.prerequisiteKnowledge,
         misconceptions: parsed.misconceptions,
@@ -414,6 +450,10 @@ Avoid fabricated claims and unsupported numbers.`;
       this.logger.info(`Using AI content strategy via ${this.aiTextService.providerName}`);
       return strategy;
     } catch (error) {
+      if (isBiologyMode()) {
+        this.logger.error(`AI editorial strategy failed after retries: ${error.message}`);
+        throw new Error(`AI editorial strategy failed after retries: ${error.message}`, { cause: error });
+      }
       this.logger.warn(`AI content strategy failed; using template fallback: ${error.message}`);
       return null;
     }

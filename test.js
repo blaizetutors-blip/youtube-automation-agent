@@ -543,6 +543,7 @@ class SystemTest {
 
   async testStructuredAIGeneration() {
     const { AITextService } = require('./utils/ai-text-service');
+    const { ContentStrategyAgent } = require('./agents/content-strategy-agent');
     const { ScriptWriterAgent } = require('./agents/script-writer-agent');
     const { ContentReviewAgent } = require('./agents/content-review-agent');
     const fs = require('fs').promises;
@@ -562,6 +563,9 @@ class SystemTest {
           if (request.config.responseMimeType !== 'application/json' || !request.config.responseJsonSchema) {
             throw new Error('Structured Gemini configuration was not forwarded');
           }
+          if (request.config.thinkingConfig?.thinkingBudget !== 0) {
+            throw new Error('Gemini thinking budget was not forwarded');
+          }
           return { text: '{"ok":true}' };
         }
       }
@@ -572,11 +576,32 @@ class SystemTest {
 
     const retryResult = await service.generateText('Return JSON', {
       retries: 1,
+      thinkingBudget: 0,
       responseMimeType: 'application/json',
       responseJsonSchema: { type: 'object' }
     });
     if (retryResult !== '{"ok":true}' || providerCalls !== 2) {
       throw new Error('Transient Gemini failure was not retried successfully');
+    }
+
+    const truncationService = new AITextService({});
+    truncationService.gemini = {
+      models: {
+        generateContent: async () => ({
+          text: '{"partial":"response',
+          candidates: [{ finishReason: 'MAX_TOKENS' }]
+        })
+      }
+    };
+    truncationService.model = 'test-gemini';
+    let truncationDetected = false;
+    try {
+      await truncationService.generateTextOnce('Return JSON', { maxTokens: 64 });
+    } catch (error) {
+      truncationDetected = error.code === 'AI_OUTPUT_TRUNCATED' && /truncated/i.test(error.message);
+    }
+    if (!truncationDetected) {
+      throw new Error('Gemini MAX_TOKENS response was not identified as truncation');
     }
 
     const jsonService = new AITextService({});
@@ -636,7 +661,10 @@ class SystemTest {
       if (review.automatedVerdict !== 'pass') {
         throw new Error('Structured Biology review result was not accepted');
       }
-      if (!reviewOptions.responseJsonSchema || reviewOptions.maxTokens < 4096 || reviewOptions.jsonRetries < 2) {
+      if (
+        !reviewOptions.responseJsonSchema || reviewOptions.maxTokens < 8192 ||
+        reviewOptions.jsonRetries < 2 || reviewOptions.thinkingBudget !== 0
+      ) {
         throw new Error('Biology review did not request resilient schema-constrained JSON');
       }
     } finally {
@@ -646,6 +674,38 @@ class SystemTest {
     const previousMode = process.env.BLAIZE_BIOLOGY_MODE;
     process.env.BLAIZE_BIOLOGY_MODE = 'true';
     try {
+      const strategist = new ContentStrategyAgent(null, {});
+      const strategyOptions = [];
+      let strategyCalls = 0;
+      strategist.aiTextService = {
+        isAvailable: () => true,
+        providerName: 'Test Gemini',
+        generateJson: async (_prompt, options) => {
+          strategyCalls++;
+          strategyOptions.push(options);
+          if (strategyCalls === 1) {
+            return {
+              candidateAngles: this.createValidBiologyStrategy().candidateAngles,
+              selectedAngle: this.createValidBiologyStrategy().angle,
+              selectionRationale: this.createValidBiologyStrategy().selectionRationale,
+              coreQuestion: this.createValidBiologyStrategy().coreQuestion,
+              lessonPromise: this.createValidBiologyStrategy().lessonPromise
+            };
+          }
+          return this.createValidBiologyStrategy();
+        }
+      };
+      const strategy = await strategist.generateContentStrategyWithAI('Cell structure and organisation');
+      if (!strategy || strategyCalls !== 2 || strategy.candidateAngles.length < 3) {
+        throw new Error('Biology strategy did not complete staged brainstorm and blueprint generation');
+      }
+      if (
+        strategyOptions.some(options => options.thinkingBudget !== 0) ||
+        strategyOptions[1].maxTokens < 8192
+      ) {
+        throw new Error('Biology strategy did not request a resilient Gemini output budget');
+      }
+
       const writer = new ScriptWriterAgent({ saveScript: async () => {} }, {});
       let scriptCalls = 0;
       let structuredOptions;
@@ -669,6 +729,9 @@ class SystemTest {
       }
       if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
         throw new Error('Script writer did not request schema-constrained JSON');
+      }
+      if (structuredOptions.thinkingBudget !== 0 || structuredOptions.maxTokens < 12288) {
+        throw new Error('Script writer did not request a resilient Gemini output budget');
       }
     } finally {
       if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;

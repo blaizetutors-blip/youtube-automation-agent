@@ -131,7 +131,8 @@ Keep tags under YouTube's 500 character total guidance. Avoid fabricated statist
     try {
       const parsed = await this.aiTextService.generateJson(prompt, {
         maxTokens: 3000,
-        temperature: 0.45,
+        temperature: 1,
+        thinkingBudget: 0,
         retries: 2,
         jsonRetries: 2,
         responseJsonSchema: SEO_RESPONSE_SCHEMA
