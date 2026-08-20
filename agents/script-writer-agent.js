@@ -241,7 +241,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
           ? '\nThis is a retry because the previous response was invalid. Return one complete JSON object only.'
           : '';
         const response = await this.aiTextService.generateText(prompt + retryInstruction, {
-          maxTokens: 12288,
+          maxTokens: 8192,
           temperature: 1,
           thinkingBudget: 0,
           retries: 2,

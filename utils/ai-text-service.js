@@ -185,11 +185,43 @@ class AITextService {
         }
       }
 
-      const response = await this.gemini.models.generateContent({
-        model,
-        contents: prompt,
-        config,
-      });
+      const compatibleConfigs = [config];
+      if (maxTokens > 8192) {
+        compatibleConfigs.push({ ...config, maxOutputTokens: 8192 });
+      }
+      if (config.responseJsonSchema || config.responseSchema) {
+        const jsonModeConfig = { ...compatibleConfigs[compatibleConfigs.length - 1] };
+        delete jsonModeConfig.responseJsonSchema;
+        delete jsonModeConfig.responseSchema;
+        compatibleConfigs.push(jsonModeConfig);
+      }
+
+      let response;
+      let lastError;
+      for (let attempt = 0; attempt < compatibleConfigs.length; attempt++) {
+        try {
+          response = await this.gemini.models.generateContent({
+            model,
+            contents: prompt,
+            config: compatibleConfigs[attempt],
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          const invalidArgument = Number(error?.status || error?.code) === 400 ||
+            /INVALID_ARGUMENT|invalid argument/i.test(String(error?.message || error));
+          if (!invalidArgument || attempt === compatibleConfigs.length - 1) {
+            throw error;
+          }
+
+          const nextConfig = compatibleConfigs[attempt + 1];
+          const adjustment = nextConfig.maxOutputTokens !== compatibleConfigs[attempt].maxOutputTokens
+            ? `retrying with a compatible ${nextConfig.maxOutputTokens}-token output limit`
+            : 'retrying in JSON mode with local schema validation';
+          this.logger.warn(`Gemini rejected the request configuration; ${adjustment}`);
+        }
+      }
+      if (!response) throw lastError;
       const text = response.text;
       const finishReason = response.candidates?.[0]?.finishReason;
       if (finishReason === 'MAX_TOKENS') {

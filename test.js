@@ -604,6 +604,37 @@ class SystemTest {
       throw new Error('Gemini MAX_TOKENS response was not identified as truncation');
     }
 
+    const compatibilityService = new AITextService({});
+    const compatibilityRequests = [];
+    compatibilityService.gemini = {
+      models: {
+        generateContent: async request => {
+          compatibilityRequests.push(request.config);
+          if (request.config.responseJsonSchema) {
+            const error = new Error('Request contains an invalid argument.');
+            error.status = 400;
+            throw error;
+          }
+          return { text: '{"compatible":true}' };
+        }
+      }
+    };
+    compatibilityService.model = 'test-gemini';
+    compatibilityService.providerName = 'Test Gemini';
+    const compatibilityResult = await compatibilityService.generateTextOnce('Return JSON', {
+      maxTokens: 12288,
+      thinkingBudget: 0,
+      responseMimeType: 'application/json',
+      responseJsonSchema: { type: 'object' }
+    });
+    if (
+      compatibilityResult !== '{"compatible":true}' || compatibilityRequests.length !== 3 ||
+      compatibilityRequests[1].maxOutputTokens !== 8192 ||
+      compatibilityRequests[2].responseJsonSchema !== undefined
+    ) {
+      throw new Error('Gemini request configuration was not downgraded safely');
+    }
+
     const jsonService = new AITextService({});
     let jsonCalls = 0;
     let jsonOptions;
@@ -730,7 +761,7 @@ class SystemTest {
       if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
         throw new Error('Script writer did not request schema-constrained JSON');
       }
-      if (structuredOptions.thinkingBudget !== 0 || structuredOptions.maxTokens < 12288) {
+      if (structuredOptions.thinkingBudget !== 0 || structuredOptions.maxTokens < 8192) {
         throw new Error('Script writer did not request a resilient Gemini output budget');
       }
     } finally {
