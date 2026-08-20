@@ -2,6 +2,8 @@ const OpenAI = require('openai');
 const { Logger } = require('./logger');
 
 const geminiRequestTimesByModel = new Map();
+const geminiDailyExhaustedModels = new Set();
+const geminiUnavailableModels = new Set();
 const GEMINI_RATE_WINDOW_MS = 60000;
 
 const PROVIDERS = {
@@ -88,7 +90,7 @@ class AITextService {
     try {
       const { GoogleGenAI } = require('@google/genai');
       this.gemini = new GoogleGenAI({ apiKey });
-      this.model = model || 'gemini-3.5-flash';
+      this.model = model || 'gemini-3.7-flash';
       this.providerName = 'Google Gemini';
       this.logger.info(`Gemini initialized (model: ${this.model})`);
     } catch (error) {
@@ -175,70 +177,48 @@ class AITextService {
     const temperature = options.temperature ?? 0.7;
 
     if (this.gemini) {
-      const config = { maxOutputTokens: maxTokens, temperature };
-      for (const key of ['responseMimeType', 'responseSchema', 'responseJsonSchema']) {
-        if (options[key] !== undefined) {
-          config[key] = options[key];
-        }
-      }
-      if (options.thinkingBudget !== undefined || options.thinkingLevel !== undefined) {
-        config.thinkingConfig = {};
-        if (options.thinkingBudget !== undefined) {
-          config.thinkingConfig.thinkingBudget = options.thinkingBudget;
-        }
-        if (options.thinkingLevel !== undefined) {
-          config.thinkingConfig.thinkingLevel = options.thinkingLevel;
-        }
-      }
-
-      const compatibleConfigs = [config];
-      if (maxTokens > 8192) {
-        compatibleConfigs.push({ ...config, maxOutputTokens: 8192 });
-      }
-      if (config.responseJsonSchema || config.responseSchema) {
-        const jsonModeConfig = { ...compatibleConfigs[compatibleConfigs.length - 1] };
-        delete jsonModeConfig.responseJsonSchema;
-        delete jsonModeConfig.responseSchema;
-        compatibleConfigs.push(jsonModeConfig);
-      }
-
-      let response;
       let lastError;
-      for (let attempt = 0; attempt < compatibleConfigs.length; attempt++) {
+      const candidates = this.getGeminiModelCandidates(model);
+      for (const candidate of candidates) {
+        if (geminiDailyExhaustedModels.has(candidate) || geminiUnavailableModels.has(candidate)) continue;
         try {
-          await this.waitForGeminiRequestSlot(model);
-          response = await this.gemini.models.generateContent({
-            model,
-            contents: prompt,
-            config: compatibleConfigs[attempt],
-          });
-          break;
+          return await this.generateGeminiTextOnce(prompt, candidate, maxTokens, temperature, options);
         } catch (error) {
           lastError = error;
-          const invalidArgument = Number(error?.status || error?.code) === 400 ||
-            /INVALID_ARGUMENT|invalid argument/i.test(String(error?.message || error));
-          if (!invalidArgument || attempt === compatibleConfigs.length - 1) {
-            throw error;
-          }
+          const dailyQuota = this.isDailyQuotaError(error);
+          const unavailableModel = this.isGeminiModelUnavailableError(error);
+          if (!dailyQuota && !unavailableModel) throw error;
 
-          const nextConfig = compatibleConfigs[attempt + 1];
-          const adjustment = nextConfig.maxOutputTokens !== compatibleConfigs[attempt].maxOutputTokens
-            ? `retrying with a compatible ${nextConfig.maxOutputTokens}-token output limit`
-            : 'retrying in JSON mode with local schema validation';
-          this.logger.warn(`Gemini rejected the request configuration; ${adjustment}`);
+          if (dailyQuota) geminiDailyExhaustedModels.add(candidate);
+          if (unavailableModel) geminiUnavailableModels.add(candidate);
+          const nextModel = candidates.find(item =>
+            !geminiDailyExhaustedModels.has(item) && !geminiUnavailableModels.has(item)
+          );
+          if (nextModel) {
+            this.logger.warn(
+              dailyQuota
+                ? `Gemini daily quota exhausted for ${candidate}; switching this job to ${nextModel}`
+                : `Gemini model ${candidate} is unavailable for this project; switching this job to ${nextModel}`
+            );
+          }
         }
       }
-      if (!response) throw lastError;
-      const text = response.text;
-      const finishReason = response.candidates?.[0]?.finishReason;
-      if (finishReason === 'MAX_TOKENS') {
-        const error = new Error(
-          `Gemini output was truncated at the configured token limit (${String(text || '').length} characters returned)`
+
+      if (lastError) throw lastError;
+      if (candidates.every(candidate => geminiDailyExhaustedModels.has(candidate))) {
+        const quotaError = new Error(
+          'All configured Gemini models have exhausted their daily request quotas. ' +
+          'The validated checkpoint is preserved; quotas reset at midnight Pacific time.'
         );
-        error.code = 'AI_OUTPUT_TRUNCATED';
-        throw error;
+        quotaError.status = 429;
+        quotaError.code = 'GEMINI_DAILY_QUOTA_EXHAUSTED';
+        throw quotaError;
       }
-      return text;
+      const unavailableError = new Error(
+        'No configured Gemini fallback model is available to this project. The validated checkpoint is preserved.'
+      );
+      unavailableError.code = 'GEMINI_MODELS_UNAVAILABLE';
+      throw unavailableError;
     }
 
     if (!this.client) {
@@ -255,7 +235,75 @@ class AITextService {
     return response.choices[0].message.content;
   }
 
+  async generateGeminiTextOnce(prompt, model, maxTokens, temperature, options) {
+    const config = { maxOutputTokens: maxTokens, temperature };
+    for (const key of ['responseMimeType', 'responseSchema', 'responseJsonSchema']) {
+      if (options[key] !== undefined) {
+        config[key] = options[key];
+      }
+    }
+    if (options.thinkingBudget !== undefined || options.thinkingLevel !== undefined) {
+      config.thinkingConfig = {};
+      if (options.thinkingBudget !== undefined) {
+        config.thinkingConfig.thinkingBudget = options.thinkingBudget;
+      }
+      if (options.thinkingLevel !== undefined) {
+        config.thinkingConfig.thinkingLevel = options.thinkingLevel;
+      }
+    }
+
+    const compatibleConfigs = [config];
+    if (maxTokens > 8192) {
+      compatibleConfigs.push({ ...config, maxOutputTokens: 8192 });
+    }
+    if (config.responseJsonSchema || config.responseSchema) {
+      const jsonModeConfig = { ...compatibleConfigs[compatibleConfigs.length - 1] };
+      delete jsonModeConfig.responseJsonSchema;
+      delete jsonModeConfig.responseSchema;
+      compatibleConfigs.push(jsonModeConfig);
+    }
+
+    let response;
+    let lastError;
+    for (let attempt = 0; attempt < compatibleConfigs.length; attempt++) {
+      try {
+        await this.waitForGeminiRequestSlot(model);
+        response = await this.gemini.models.generateContent({
+          model,
+          contents: prompt,
+          config: compatibleConfigs[attempt],
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        const invalidArgument = Number(error?.status || error?.code) === 400 ||
+          /INVALID_ARGUMENT|invalid argument/i.test(String(error?.message || error));
+        if (!invalidArgument || attempt === compatibleConfigs.length - 1) {
+          throw error;
+        }
+
+        const nextConfig = compatibleConfigs[attempt + 1];
+        const adjustment = nextConfig.maxOutputTokens !== compatibleConfigs[attempt].maxOutputTokens
+          ? `retrying with a compatible ${nextConfig.maxOutputTokens}-token output limit`
+          : 'retrying in JSON mode with local schema validation';
+        this.logger.warn(`Gemini rejected the request configuration; ${adjustment}`);
+      }
+    }
+    if (!response) throw lastError;
+    const text = response.text;
+    const finishReason = response.candidates?.[0]?.finishReason;
+    if (finishReason === 'MAX_TOKENS') {
+      const error = new Error(
+        `Gemini output was truncated at the configured token limit (${String(text || '').length} characters returned)`
+      );
+      error.code = 'AI_OUTPUT_TRUNCATED';
+      throw error;
+    }
+    return text;
+  }
+
   isRetryableError(error) {
+    if (this.isDailyQuotaError(error) || error?.code === 'GEMINI_MODELS_UNAVAILABLE') return false;
     const status = error?.status || error?.code || error?.response?.status;
     if ([429, 500, 502, 503, 504].includes(Number(status))) {
       return true;
@@ -263,6 +311,28 @@ class AITextService {
 
     const message = String(error?.message || error || '');
     return /\b(?:429|500|502|503|504)\b|high demand|temporar(?:y|ily)|unavailable|resource exhausted|rate limit/i.test(message);
+  }
+
+  isDailyQuotaError(error) {
+    const message = String(error?.message || error || '');
+    return error?.code === 'GEMINI_DAILY_QUOTA_EXHAUSTED' ||
+      /GenerateRequestsPerDay|RequestsPerDayPerProject|requests per day|daily request quota/i.test(message);
+  }
+
+  isGeminiModelUnavailableError(error) {
+    const status = Number(error?.status || error?.code || error?.response?.status);
+    const message = String(error?.message || error || '');
+    return status === 404 ||
+      ([400, 403].includes(status) && /model[\s\S]*(?:not found|not available|unsupported|does not exist|permission)/i.test(message));
+  }
+
+  getGeminiModelCandidates(primaryModel = this.model) {
+    const configuredFallbacks = process.env.GEMINI_FALLBACK_MODELS ||
+      'gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash';
+    return [...new Set([
+      String(primaryModel || 'gemini-3.7-flash').trim(),
+      ...configuredFallbacks.split(',').map(item => item.trim()).filter(Boolean)
+    ].filter(Boolean))];
   }
 
   getRetryDelayMs(error, attempt = 0) {

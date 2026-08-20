@@ -707,6 +707,97 @@ class SystemTest {
       throw new Error('Gemini quota exhaustion was misclassified as malformed JSON');
     }
 
+    const previousFallbackModels = process.env.GEMINI_FALLBACK_MODELS;
+    try {
+      process.env.GEMINI_FALLBACK_MODELS = 'test-fallback';
+      const modelFallbackService = new AITextService({});
+      const attemptedModels = [];
+      modelFallbackService.model = 'test-daily-primary';
+      modelFallbackService.providerName = 'Test Gemini';
+      modelFallbackService.waitForGeminiRequestSlot = async () => {};
+      modelFallbackService.gemini = {
+        models: {
+          generateContent: async request => {
+            attemptedModels.push(request.model);
+            if (request.model === 'test-daily-primary') {
+              const error = new Error(
+                'Quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier'
+              );
+              error.status = 429;
+              throw error;
+            }
+            return { text: '{"fallback":true}' };
+          }
+        }
+      };
+      const fallbackResult = await modelFallbackService.generateText('Return JSON', { retries: 2 });
+      if (
+        fallbackResult !== '{"fallback":true}' ||
+        attemptedModels.join(',') !== 'test-daily-primary,test-fallback'
+      ) {
+        throw new Error('Gemini daily quota did not switch to the configured fallback model');
+      }
+
+      process.env.GEMINI_FALLBACK_MODELS = 'test-available-fallback';
+      const unavailableFallbackService = new AITextService({});
+      const availabilityAttempts = [];
+      unavailableFallbackService.model = 'test-unavailable-primary';
+      unavailableFallbackService.waitForGeminiRequestSlot = async () => {};
+      unavailableFallbackService.gemini = {
+        models: {
+          generateContent: async request => {
+            availabilityAttempts.push(request.model);
+            if (request.model === 'test-unavailable-primary') {
+              const error = new Error('Requested model was not found for this project');
+              error.status = 404;
+              throw error;
+            }
+            return { text: 'available' };
+          }
+        }
+      };
+      const availabilityResult = await unavailableFallbackService.generateText('Continue');
+      if (
+        availabilityResult !== 'available' ||
+        availabilityAttempts.join(',') !== 'test-unavailable-primary,test-available-fallback'
+      ) {
+        throw new Error('Unavailable Gemini model did not switch to the next configured fallback');
+      }
+
+      process.env.GEMINI_FALLBACK_MODELS = 'test-exhausted-fallback';
+      const exhaustedService = new AITextService({});
+      let exhaustedCalls = 0;
+      let exhaustedSleeps = 0;
+      exhaustedService.model = 'test-exhausted-primary';
+      exhaustedService.providerName = 'Test Gemini';
+      exhaustedService.waitForGeminiRequestSlot = async () => {};
+      exhaustedService.sleep = async () => { exhaustedSleeps++; };
+      exhaustedService.gemini = {
+        models: {
+          generateContent: async () => {
+            exhaustedCalls++;
+            const error = new Error(
+              'Quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier'
+            );
+            error.status = 429;
+            throw error;
+          }
+        }
+      };
+      let dailyQuotaPropagated = false;
+      try {
+        await exhaustedService.generateText('Return JSON', { retries: 2 });
+      } catch (error) {
+        dailyQuotaPropagated = exhaustedService.isDailyQuotaError(error);
+      }
+      if (!dailyQuotaPropagated || exhaustedCalls !== 2 || exhaustedSleeps !== 0) {
+        throw new Error('Exhausted Gemini daily quotas triggered pointless timed retries');
+      }
+    } finally {
+      if (previousFallbackModels === undefined) delete process.env.GEMINI_FALLBACK_MODELS;
+      else process.env.GEMINI_FALLBACK_MODELS = previousFallbackModels;
+    }
+
     const reviewDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-review-'));
     try {
       const reviewer = new ContentReviewAgent(null, {});
