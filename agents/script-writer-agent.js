@@ -26,7 +26,8 @@ const SCRIPT_RESPONSE_SCHEMA = {
           title: { type: 'string' },
           content: {
             type: 'array',
-            minItems: 1,
+            minItems: 2,
+            maxItems: 4,
             items: { type: 'string' }
           },
           visualSpec: {
@@ -189,6 +190,8 @@ Build the sections in this teaching sequence:
 6. exam application with command-word and mark-logic coaching;
 7. payoff that resolves the opening question, followed by an aligned exit question.
 Use the exact teachingBeat values diagnostic, phenomenon, model, guided_practice, misconception, exam_application and payoff at least once each.
+Produce seven or eight tightly connected sections. Every section must directly advance the selected angle, driving question and learning objectives; exclude interesting but unnecessary tangents.
+Each content array must contain 2–4 complete spoken paragraphs of roughly 55–90 words each. A title, note, bullet fragment or visual direction is not spoken teaching.
 Every section must include a structured visualSpec. Select the closest topic-specific 3D template from cell, membrane_transport, enzyme_reaction, molecule_model, plant_process, circulation, organ_system, inheritance, ecology, microorganism, practical_setup, data_visualization, exam_annotation or concept_map. Its elements and relationships must be scientifically meaningful; animationSteps must progressively reveal an idea rather than decorate the screen; accuracyChecks must state what a human reviewer should verify; modelLimitations must explicitly identify simplification, omitted scale or other limits of the school-level model.
 Keep on-screen concepts concise but make content a complete spoken teaching script, not notes or placeholders. Create an attention reset every 45–90 seconds through prediction, contrast, diagram reveal, data reading, practical reasoning or exam decision.
 Use British English. Define specialist vocabulary before using it. Do not invent statistics, research, citations, personal experience or exam-board wording. Do not give medical diagnosis or treatment advice.`
@@ -204,7 +207,10 @@ Return only valid JSON with this exact shape:
     {
       "teachingBeat": "diagnostic|phenomenon|model|guided_practice|misconception|exam_application|payoff|recap",
       "title": "section title",
-      "content": ["complete spoken-script beat"],
+      "content": [
+        "first complete spoken paragraph explaining or questioning the biological idea",
+        "second complete spoken paragraph developing, applying or checking the idea"
+      ],
       "visualSpec": {
         "type": "labelled_diagram|process_flow|comparison|graph|data_table|practical_setup|exam_annotation|concept_map",
         "template": "cell|membrane_transport|enzyme_reaction|molecule_model|plant_process|circulation|organ_system|inheritance|ecology|microorganism|practical_setup|data_visualization|exam_annotation|concept_map",
@@ -213,7 +219,7 @@ Return only valid JSON with this exact shape:
         "relationships": ["A causes or connects to B"],
         "animationSteps": ["progressive reveal step"],
         "accuracyChecks": ["specific scientific check"],
-        "modelLimitations": ["what is simplified, omitted or not to scale"]
+        "modelLimitations": ["explicitly state what is simplified, omitted, exaggerated or not to scale"]
       },
       "retentionPurpose": "how this beat renews attention while advancing learning",
       "duration": 60
@@ -227,6 +233,16 @@ Topic: ${strategy.topic}
 Style/content type: ${strategy.contentType}
 Angle: ${strategy.angle}
 Target audience: ${strategy.targetAudience}
+Driving question: ${strategy.coreQuestion || 'Use the selected angle to define one precise driving question.'}
+Lesson promise: ${strategy.lessonPromise || 'State one assessable learner payoff.'}
+Learning objectives: ${JSON.stringify(strategy.learningObjectives || [])}
+Prerequisite knowledge to retrieve: ${JSON.stringify(strategy.prerequisiteKnowledge || [])}
+Misconceptions to diagnose and correct: ${JSON.stringify(strategy.misconceptions || [])}
+Exam command words: ${JSON.stringify(strategy.examFocus?.commandWords || [])}
+Exam skills: ${JSON.stringify(strategy.examFocus?.skills || [])}
+Common exam traps: ${JSON.stringify(strategy.examFocus?.commonTraps || [])}
+Purposeful retention plan: ${JSON.stringify(strategy.retentionPlan || [])}
+Instructional visual plan: ${JSON.stringify(strategy.visualPlan || [])}
 Desired length: ${process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'}
 Tone: ${template.tone}
 Pacing: ${template.pacing}
@@ -235,10 +251,12 @@ ${biologyRequirements}
 Avoid fabricated statistics, unsupported claims, and fake urgency.`;
 
     let lastError;
+    let validationFeedback = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const retryInstruction = attempt > 1
-          ? '\nThis is a retry because the previous response was invalid. Return one complete JSON object only.'
+          ? `\nThe previous response failed validation because: ${validationFeedback}\n` +
+            'Correct every listed defect. Return one complete replacement JSON object only.'
           : '';
         const response = await this.aiTextService.generateText(prompt + retryInstruction, {
           maxTokens: 8192,
@@ -287,6 +305,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
         return script;
       } catch (error) {
         lastError = error;
+        validationFeedback = String(error.message || error).slice(0, 6000);
         if (attempt < 2) {
           this.logger.warn(`AI script response was unusable; retrying: ${error.message}`);
         }

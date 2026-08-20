@@ -740,14 +740,22 @@ class SystemTest {
       const writer = new ScriptWriterAgent({ saveScript: async () => {} }, {});
       let scriptCalls = 0;
       let structuredOptions;
+      const scriptPrompts = [];
       writer.aiTextService = {
         isAvailable: () => true,
         providerName: 'Test Gemini',
-        generateText: async (_prompt, options) => {
+        generateText: async (scriptPrompt, options) => {
           scriptCalls++;
+          scriptPrompts.push(scriptPrompt);
           structuredOptions = options;
           if (scriptCalls === 1) {
-            return '{"title":"Incomplete"';
+            const invalidDraft = this.createValidBiologyAIResponse();
+            invalidDraft.sections = invalidDraft.sections.map(section => ({
+              ...section,
+              content: section.content.slice(0, 1),
+              visualSpec: { ...section.visualSpec, modelLimitations: [] }
+            }));
+            return JSON.stringify(invalidDraft);
           }
           return JSON.stringify(this.createValidBiologyAIResponse());
         }
@@ -756,13 +764,27 @@ class SystemTest {
       const script = await writer.generateScriptWithAI(this.createValidBiologyStrategy(), writer.templates.explainer);
 
       if (!script || scriptCalls !== 2 || script.mainContent.sections.length !== 7) {
-        throw new Error('Malformed Biology JSON was not retried and normalized');
+        throw new Error('Biology quality-gate failure was not repaired and normalized');
       }
       if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
         throw new Error('Script writer did not request schema-constrained JSON');
       }
       if (structuredOptions.thinkingBudget !== 0 || structuredOptions.maxTokens < 8192) {
         throw new Error('Script writer did not request a resilient Gemini output budget');
+      }
+      if (
+        !scriptPrompts[0].includes('Driving question:') ||
+        !scriptPrompts[0].includes('Misconceptions to diagnose and correct:') ||
+        !scriptPrompts[0].includes('Instructional visual plan:')
+      ) {
+        throw new Error('Script writer did not receive the complete Biology strategy blueprint');
+      }
+      if (
+        !scriptPrompts[1].includes('previous response failed validation because') ||
+        !scriptPrompts[1].includes('needs at least two substantive spoken-script beats') ||
+        !scriptPrompts[1].includes("does not disclose the model's limitations or scale")
+      ) {
+        throw new Error('Script repair request did not include actionable validation feedback');
       }
     } finally {
       if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;

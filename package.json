@@ -1,6 +1,6 @@
 {
   "name": "youtube-automation-agent",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Fully automated YouTube channel management system with specialized AI agents",
   "main": "index.js",
   "scripts": {
