@@ -44,6 +44,11 @@ class PublishingSchedulingAgent {
 
   async scheduleContent(productionData) {
     try {
+      if (productionData.status !== 'ready') {
+        this.logger.warn(`Not scheduling ${productionData.id}: production status is ${productionData.status || 'unknown'}, not ready.`);
+        return null;
+      }
+
       const finalVideo = productionData.assets?.finalVideo;
       if (!finalVideo || finalVideo.simulated || path.extname(finalVideo.path || '').toLowerCase() !== '.mp4') {
         this.logger.warn(`Not scheduling ${productionData.id}: no real video file was produced (placeholder/simulated output). Fix your AI provider keys and FFmpeg, then regenerate.`);

@@ -339,6 +339,7 @@ class SystemTest {
 
     const simulated = await agent.scheduleContent({
       id: 'prod-simulated',
+      status: 'simulated',
       script: { title: 'Simulated' },
       assets: { finalVideo: { path: 'video.mp4.assembly.json', simulated: true } }
     });
@@ -348,6 +349,7 @@ class SystemTest {
 
     const missingVideo = await agent.scheduleContent({
       id: 'prod-missing',
+      status: 'ready',
       script: { title: 'Missing' },
       assets: {}
     });
@@ -355,8 +357,19 @@ class SystemTest {
       throw new Error('Production without a final video was scheduled for publishing');
     }
 
+    const missingNarration = await agent.scheduleContent({
+      id: 'prod-no-narration',
+      status: 'needs_narration',
+      script: { title: 'Silent' },
+      assets: { finalVideo: { path: 'silent-video.mp4' } }
+    });
+    if (missingNarration !== null) {
+      throw new Error('Production without narration was scheduled for publishing');
+    }
+
     const real = await agent.scheduleContent({
       id: 'prod-real',
+      status: 'ready',
       script: { title: 'Real' },
       priority: 50,
       scheduledPublishTime: new Date().toISOString(),
@@ -407,6 +420,41 @@ class SystemTest {
       }
       if (geminiOnly.openai) {
         throw new Error('OpenAI client initialized without a key');
+      }
+
+      const longNarration = `${'First sentence explains cells clearly. '.repeat(90)}Final sentence.`;
+      const chunks = geminiOnly.splitTextForTTS(longNarration, 240);
+      if (chunks.length < 2 || chunks.some(chunk => chunk.length > 240)) {
+        throw new Error('Long Gemini narration was not split into bounded chunks');
+      }
+
+      let ttsCalls = 0;
+      geminiOnly.gemini = {
+        models: {
+          generateContent: async () => {
+            ttsCalls++;
+            if (ttsCalls === 1) {
+              const error = new Error('503 high demand');
+              error.status = 503;
+              throw error;
+            }
+            return {
+              candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from('pcm').toString('base64') } }] } }]
+            };
+          }
+        }
+      };
+      geminiOnly.sleep = async () => {};
+      const pcm = await geminiOnly.generateGeminiTTSChunk({
+        text: 'Test narration',
+        model: 'test-model',
+        voiceName: 'Kore',
+        chunkNumber: 1,
+        totalChunks: 1,
+        retries: 1
+      });
+      if (pcm.toString() !== 'pcm' || ttsCalls !== 2) {
+        throw new Error('Transient Gemini TTS failure was not retried successfully');
       }
 
       const none = new AIVideoGenerator({});

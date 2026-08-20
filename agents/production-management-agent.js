@@ -103,9 +103,14 @@ class ProductionManagementAgent {
       // Final assembly
       await this.assembleVideo(productionData);
 
-      // Mark as ready — or simulated, when no real video could be produced
+      // Narration is mandatory. A silent MP4 must never be represented as ready.
+      const hasNarration = await this.aiVideoGenerator.isUsableAudioFile(productionData.assets.audio?.path);
       const simulated = Boolean(productionData.assets.finalVideo?.simulated);
-      if (simulated) {
+      if (!hasNarration) {
+        productionData.status = 'needs_narration';
+        productionData.timeline.readyForUpload = null;
+        this.logger.warn(`Content ${productionId} is blocked: narration was not generated. It will NOT enter the review or publishing queue.`);
+      } else if (simulated) {
         productionData.status = 'simulated';
         this.logger.warn(`Content ${productionId} produced PLACEHOLDER assets only — it will NOT be uploaded. Check your AI provider keys and FFmpeg installation.`);
       } else {
@@ -485,6 +490,10 @@ class ProductionManagementAgent {
       
       // Generate audio using AI TTS
       await this.aiVideoGenerator.generateTTSAudio(ttsText, audioPath);
+
+      if (!(await this.aiVideoGenerator.isUsableAudioFile(audioPath))) {
+        throw new Error('TTS provider did not produce a usable narration file');
+      }
       
       productionData.assets.audio = {
         path: audioPath,
@@ -617,6 +626,11 @@ class ProductionManagementAgent {
     this.logger.info('Assembling final AI-generated video...');
     
     try {
+      if (!(await this.aiVideoGenerator.isUsableAudioFile(productionData.assets.audio?.path))) {
+        this.logger.warn('Skipping final video assembly because narration is unavailable');
+        return await this.simulateVideoAssembly(productionData);
+      }
+
       const finalVideoPath = path.join(__dirname, '..', 'data', 'videos', `${productionData.id}_final.mp4`);
 
       // Use AI Video Generator to create the final video

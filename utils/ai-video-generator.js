@@ -135,36 +135,136 @@ class AIVideoGenerator {
     const model = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
     const voiceName = process.env.GEMINI_TTS_VOICE || 'Kore';
     const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
-    const narrationText = biologyMode
-      ? `Read the following Biology lesson in a clear, warm, neutral African-British academic voice. Use calm authority, natural pacing, precise scientific pronunciation and brief pauses around definitions. Do not speak these directions. Lesson:\n\n${text}`
-      : text;
+    const directions = biologyMode
+      ? 'Read this Biology lesson in a clear, warm, neutral African-British academic voice. Use calm authority, natural pacing, precise scientific pronunciation and brief pauses around definitions. Do not speak these directions.'
+      : 'Read the following narration naturally. Do not speak these directions.';
+    const chunks = this.splitTextForTTS(text);
 
-    const response = await this.gemini.models.generateContent({
-      model,
-      contents: [{ parts: [{ text: narrationText }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName }
-          }
-        }
-      }
-    });
-
-    const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!audioData) {
-      throw new Error('Gemini TTS returned no audio data');
+    if (chunks.length === 0) {
+      throw new Error('Gemini TTS received no narration text');
     }
 
-    // Gemini returns raw PCM (24kHz, mono, 16-bit); encode to the requested container via FFmpeg
+    this.logger.info(`Generating Gemini TTS in ${chunks.length} chunk${chunks.length === 1 ? '' : 's'}...`);
+    const audioBuffers = [];
+    for (let index = 0; index < chunks.length; index++) {
+      this.logger.info(`Gemini TTS chunk ${index + 1}/${chunks.length}`);
+      audioBuffers.push(await this.generateGeminiTTSChunk({
+        text: `${directions}\n\nLesson part ${index + 1} of ${chunks.length}:\n${chunks[index]}`,
+        model,
+        voiceName,
+        chunkNumber: index + 1,
+        totalChunks: chunks.length
+      }));
+    }
+
+    // Gemini returns raw PCM (24kHz, mono, 16-bit). Chunks use the same
+    // format and voice, so they can be concatenated before one final encode.
     const pcmPath = outputPath + '.pcm';
-    await fs.writeFile(pcmPath, Buffer.from(audioData, 'base64'));
-    await runFFmpeg(['-y', '-f', 's16le', '-ar', '24000', '-ac', '1', '-i', pcmPath, outputPath]);
-    await fs.unlink(pcmPath).catch(() => {});
+    try {
+      await fs.writeFile(pcmPath, Buffer.concat(audioBuffers));
+      await runFFmpeg(['-y', '-f', 's16le', '-ar', '24000', '-ac', '1', '-i', pcmPath, outputPath]);
+    } finally {
+      await fs.unlink(pcmPath).catch(() => {});
+    }
 
     this.logger.info('Gemini TTS generation complete');
     return outputPath;
+  }
+
+  splitTextForTTS(text, maxCharacters = 2400) {
+    const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+    if (!normalized) return [];
+
+    const sentences = normalized
+      .split(/(?<=[.!?])\s+|\n{2,}/)
+      .map(part => part.trim())
+      .filter(Boolean);
+    const chunks = [];
+    let current = '';
+
+    const appendPiece = piece => {
+      if (!current) {
+        current = piece;
+      } else if (current.length + 1 + piece.length <= maxCharacters) {
+        current += ` ${piece}`;
+      } else {
+        chunks.push(current);
+        current = piece;
+      }
+    };
+
+    for (const sentence of sentences) {
+      if (sentence.length <= maxCharacters) {
+        appendPiece(sentence);
+        continue;
+      }
+
+      const words = sentence.split(/\s+/);
+      let piece = '';
+      for (const word of words) {
+        if (!piece) {
+          piece = word;
+        } else if (piece.length + 1 + word.length <= maxCharacters) {
+          piece += ` ${word}`;
+        } else {
+          appendPiece(piece);
+          piece = word;
+        }
+      }
+      if (piece) appendPiece(piece);
+    }
+
+    if (current) chunks.push(current);
+    return chunks;
+  }
+
+  async generateGeminiTTSChunk({ text, model, voiceName, chunkNumber, totalChunks, retries = 3 }) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const response = await this.gemini.models.generateContent({
+          model,
+          contents: [{ parts: [{ text }] }],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName }
+              }
+            }
+          }
+        });
+
+        const audioPart = response.candidates?.[0]?.content?.parts
+          ?.find(part => part.inlineData?.data);
+        if (!audioPart?.inlineData?.data) {
+          throw new Error('Gemini TTS returned no audio data');
+        }
+        return Buffer.from(audioPart.inlineData.data, 'base64');
+      } catch (error) {
+        const retryable = this.isRetryableGeminiMediaError(error);
+        if (!retryable || attempt === retries) throw error;
+
+        const delayMs = Math.min(15000, 2000 * (2 ** attempt));
+        this.logger.warn(
+          `Gemini TTS chunk ${chunkNumber}/${totalChunks} failed (${error.message}); retrying ${attempt + 1}/${retries} in ${delayMs / 1000}s`
+        );
+        await this.sleep(delayMs);
+      }
+    }
+
+    throw new Error('Gemini TTS retry loop ended unexpectedly');
+  }
+
+  isRetryableGeminiMediaError(error) {
+    const status = Number(error?.status || error?.response?.status || error?.code);
+    if ([408, 429, 500, 502, 503, 504].includes(status)) return true;
+
+    return /timeout|timed out|high demand|temporar|unavailable|resource exhausted|rate limit|network|fetch failed|socket hang up|ECONNRESET|ETIMEDOUT/i
+      .test(String(error?.message || ''));
+  }
+
+  async sleep(ms) {
+    await new Promise(resolve => setTimeout(resolve, ms));
   }
 
   async generateVisualAssets(prompt, style = "ethereal", count = 1) {
