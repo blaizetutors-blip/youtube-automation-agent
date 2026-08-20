@@ -6,10 +6,16 @@ const {
   CHANNEL_PROFILE,
   isBiologyMode
 } = require('../config/blaize-biology');
+const { evaluateBiologyStrategy } = require('../utils/biology-quality-gate');
 
 const STRATEGY_RESPONSE_SCHEMA = {
   type: 'object',
-  required: ['topic', 'angle', 'targetAudience', 'contentType', 'keywords'],
+  required: [
+    'topic', 'angle', 'targetAudience', 'contentType', 'keywords', 'seriesFormat',
+    'candidateAngles', 'selectionRationale', 'coreQuestion', 'lessonPromise',
+    'learningObjectives', 'prerequisiteKnowledge', 'misconceptions', 'examFocus',
+    'retentionPlan', 'visualPlan'
+  ],
   properties: {
     topic: { type: 'string' },
     angle: { type: 'string' },
@@ -18,7 +24,29 @@ const STRATEGY_RESPONSE_SCHEMA = {
       type: 'string',
       enum: ['Tutorial', 'Explainer', 'List', 'Review', 'Story', 'News']
     },
-    keywords: { type: 'array', items: { type: 'string' } }
+    keywords: { type: 'array', items: { type: 'string' } },
+    seriesFormat: {
+      type: 'string',
+      enum: ['CONCEPT LAB', 'EXAM CLINIC', 'PRACTICAL BIOLOGY', 'DATA CLINIC', 'COMMON MISTAKE', '60-SECOND REVISION']
+    },
+    candidateAngles: { type: 'array', minItems: 3, items: { type: 'string' } },
+    selectionRationale: { type: 'string' },
+    coreQuestion: { type: 'string' },
+    lessonPromise: { type: 'string' },
+    learningObjectives: { type: 'array', minItems: 3, items: { type: 'string' } },
+    prerequisiteKnowledge: { type: 'array', minItems: 2, items: { type: 'string' } },
+    misconceptions: { type: 'array', minItems: 1, items: { type: 'string' } },
+    examFocus: {
+      type: 'object',
+      required: ['commandWords', 'skills', 'commonTraps'],
+      properties: {
+        commandWords: { type: 'array', minItems: 1, items: { type: 'string' } },
+        skills: { type: 'array', minItems: 1, items: { type: 'string' } },
+        commonTraps: { type: 'array', minItems: 1, items: { type: 'string' } }
+      }
+    },
+    retentionPlan: { type: 'array', minItems: 4, items: { type: 'string' } },
+    visualPlan: { type: 'array', minItems: 5, items: { type: 'string' } }
   }
 };
 
@@ -244,6 +272,10 @@ class ContentStrategyAgent {
         return aiStrategy;
       }
 
+      if (isBiologyMode()) {
+        throw new Error('Blaize Biology mode requires a complete AI-generated editorial strategy; generic fallback strategies are disabled.');
+      }
+
       this.logger.info('Using template content strategy generation');
       if (requestedTopic) {
         topic = requestedTopic;
@@ -298,7 +330,13 @@ class ContentStrategyAgent {
     const biologyBrief = isBiologyMode()
       ? `Channel: ${CHANNEL_PROFILE.name} — ${CHANNEL_PROFILE.seriesName}.
 Audience: ${CHANNEL_PROFILE.audience}.
-Choose only secondary-school Biology. Prioritize syllabus coverage, conceptual sequencing, practical skills, data interpretation, misconceptions and exam application. Avoid general trends, medical advice, sensationalism and unsupported claims.`
+Act as a senior Biology teacher, examiner and visual lesson producer brainstorming before writing.
+Generate at least three distinct angles for the requested topic, compare their teaching value, then select one and explain why.
+The chosen lesson must move from phenomenon or problem to model to terminology, diagnose prerequisites, correct misconceptions, include guided thinking and end in exam application.
+Plan an attention reset every 45–90 seconds using a prediction, diagram reveal, contrast, data question, practical observation, misconception challenge or exam decision. Every retention beat must advance learning.
+Plan at least five topic-specific visuals. Prefer labelled diagrams, causal/process animation, comparison, specimen/practical setup, graph/data interpretation and mark-scheme annotation. State the biological purpose, not decorative style.
+Choose one recurring format: CONCEPT LAB, EXAM CLINIC, PRACTICAL BIOLOGY, DATA CLINIC, COMMON MISTAKE or 60-SECOND REVISION.
+Avoid general trends, medical advice, sensationalism, fabricated syllabus wording and unsupported claims.`
       : '';
     const prompt = `You are selecting a YouTube content strategy.
 Return only valid JSON with this exact shape:
@@ -307,7 +345,18 @@ Return only valid JSON with this exact shape:
   "angle": "distinct content angle",
   "targetAudience": "specific audience",
   "contentType": "Tutorial|Explainer|List|Review|Story|News",
-  "keywords": ["keyword"]
+  "keywords": ["keyword"],
+  "seriesFormat": "CONCEPT LAB|EXAM CLINIC|PRACTICAL BIOLOGY|DATA CLINIC|COMMON MISTAKE|60-SECOND REVISION",
+  "candidateAngles": ["three distinct candidate lesson angles"],
+  "selectionRationale": "why the selected angle best serves learning and retention",
+  "coreQuestion": "the driving biological question",
+  "lessonPromise": "specific learner payoff by the end",
+  "learningObjectives": ["three measurable outcomes using suitable command verbs"],
+  "prerequisiteKnowledge": ["knowledge learners must retrieve first"],
+  "misconceptions": ["likely misconception and the correct idea"],
+  "examFocus": { "commandWords": ["state"], "skills": ["application"], "commonTraps": ["specific trap"] },
+  "retentionPlan": ["phase: purposeful attention reset and its teaching payoff"],
+  "visualPlan": ["visual type: exact biological idea it will make visible"]
 }
 
 Requested topic: ${requestedTopic || 'none'}
@@ -324,7 +373,7 @@ Avoid fabricated claims and unsupported numbers.`;
         jsonRetries: 2,
         responseJsonSchema: STRATEGY_RESPONSE_SCHEMA
       });
-      const topic = String(parsed.topic || requestedTopic || '').trim();
+      const topic = String(requestedTopic || parsed.topic || '').trim();
 
       if (!topic) {
         throw new Error('AI strategy response missing topic');
@@ -335,8 +384,7 @@ Avoid fabricated claims and unsupported numbers.`;
         ? parsed.keywords.map(keyword => String(keyword).trim()).filter(Boolean)
         : this.extractKeywords(topic);
 
-      this.logger.info(`Using AI content strategy via ${this.aiTextService.providerName}`);
-      return {
+      const strategy = {
         topic,
         angle: String(parsed.angle || await this.generateAngle(topic)).trim(),
         targetAudience: String(parsed.targetAudience || await this.identifyTargetAudience(topic)).trim(),
@@ -345,8 +393,26 @@ Avoid fabricated claims and unsupported numbers.`;
         estimatedViews: this.predictViews(topic),
         bestPublishTime: this.calculateBestPublishTime(),
         competitorAnalysis: this.getCompetitorInsights(topic),
+        seriesFormat: parsed.seriesFormat,
+        candidateAngles: parsed.candidateAngles,
+        selectionRationale: parsed.selectionRationale,
+        coreQuestion: parsed.coreQuestion,
+        lessonPromise: parsed.lessonPromise,
+        learningObjectives: parsed.learningObjectives,
+        prerequisiteKnowledge: parsed.prerequisiteKnowledge,
+        misconceptions: parsed.misconceptions,
+        examFocus: parsed.examFocus,
+        retentionPlan: parsed.retentionPlan,
+        visualPlan: parsed.visualPlan,
         createdAt: new Date().toISOString()
       };
+      if (isBiologyMode()) {
+        const issues = evaluateBiologyStrategy(strategy);
+        if (issues.length > 0) throw new Error(`Editorial strategy failed quality gate: ${issues.join(' ')}`);
+      }
+
+      this.logger.info(`Using AI content strategy via ${this.aiTextService.providerName}`);
+      return strategy;
     } catch (error) {
       this.logger.warn(`AI content strategy failed; using template fallback: ${error.message}`);
       return null;

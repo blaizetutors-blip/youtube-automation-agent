@@ -2,7 +2,8 @@ const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
-const { CHANNEL_PROFILE } = require('../config/blaize-biology');
+const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
+const { evaluateBiologyStrategy, evaluateBiologyScript } = require('../utils/biology-quality-gate');
 
 const REVIEW_RESPONSE_SCHEMA = {
   type: 'object',
@@ -12,7 +13,12 @@ const REVIEW_RESPONSE_SCHEMA = {
     'issues',
     'claimsToVerify',
     'curriculumChecks',
-    'practicalSafetyChecks'
+    'practicalSafetyChecks',
+    'pedagogyChecks',
+    'retentionChecks',
+    'visualAccuracyChecks',
+    'assessmentChecks',
+    'revisionActions'
   ],
   properties: {
     verdict: { type: 'string', enum: ['pass', 'needs_changes', 'block'] },
@@ -20,7 +26,12 @@ const REVIEW_RESPONSE_SCHEMA = {
     issues: { type: 'array', items: { type: 'string' } },
     claimsToVerify: { type: 'array', items: { type: 'string' } },
     curriculumChecks: { type: 'array', items: { type: 'string' } },
-    practicalSafetyChecks: { type: 'array', items: { type: 'string' } }
+    practicalSafetyChecks: { type: 'array', items: { type: 'string' } },
+    pedagogyChecks: { type: 'array', items: { type: 'string' } },
+    retentionChecks: { type: 'array', items: { type: 'string' } },
+    visualAccuracyChecks: { type: 'array', items: { type: 'string' } },
+    assessmentChecks: { type: 'array', items: { type: 'string' } },
+    revisionActions: { type: 'array', items: { type: 'string' } }
   }
 };
 
@@ -48,6 +59,15 @@ class ContentReviewAgent {
       claimsToVerify: [],
       curriculumChecks: [],
       practicalSafetyChecks: [],
+      pedagogyChecks: [],
+      retentionChecks: [],
+      visualAccuracyChecks: [],
+      assessmentChecks: [],
+      revisionActions: [],
+      structuralIssues: [
+        ...evaluateBiologyStrategy(strategy),
+        ...evaluateBiologyScript(script)
+      ],
       humanApprovalRequired: true,
       approved: false,
       createdAt: new Date().toISOString()
@@ -68,10 +88,24 @@ class ContentReviewAgent {
         review.claimsToVerify = this.normalizeList(parsed.claimsToVerify);
         review.curriculumChecks = this.normalizeList(parsed.curriculumChecks);
         review.practicalSafetyChecks = this.normalizeList(parsed.practicalSafetyChecks);
+        review.pedagogyChecks = this.normalizeList(parsed.pedagogyChecks);
+        review.retentionChecks = this.normalizeList(parsed.retentionChecks);
+        review.visualAccuracyChecks = this.normalizeList(parsed.visualAccuracyChecks);
+        review.assessmentChecks = this.normalizeList(parsed.assessmentChecks);
+        review.revisionActions = this.normalizeList(parsed.revisionActions);
       } catch (error) {
         review.summary = `Automated review failed: ${error.message}. Human review is required.`;
         this.logger.warn(review.summary);
       }
+    }
+
+    if (isBiologyMode() && review.structuralIssues.length > 0) {
+      review.automatedVerdict = 'block';
+      review.issues = [...review.structuralIssues, ...review.issues];
+      review.summary = 'Blocked by the deterministic Biology teaching-quality gate.';
+    } else if (isBiologyMode() && review.automatedVerdict === 'not_run') {
+      review.automatedVerdict = 'block';
+      review.issues.push('Automated scientific and pedagogical review did not run.');
     }
 
     const reviewPath = path.join(this.reviewsPath, `${review.id}.json`);
@@ -90,7 +124,12 @@ Return only valid JSON with this exact shape:
   "issues": ["specific factual, pedagogical or wording issue"],
   "claimsToVerify": ["claim that needs checking against a named textbook, syllabus or authoritative source"],
   "curriculumChecks": ["coverage or exam-alignment check"],
-  "practicalSafetyChecks": ["laboratory or health-safety check"]
+  "practicalSafetyChecks": ["laboratory or health-safety check"],
+  "pedagogyChecks": ["sequencing, modelling, guided practice or misconception check"],
+  "retentionChecks": ["whether each attention reset advances learning and the opening promise is paid off"],
+  "visualAccuracyChecks": ["diagram, relationship, scale, label, graph or practical-setup issue"],
+  "assessmentChecks": ["alignment of diagnostic, guided and exit questions to objectives and mark logic"],
+  "revisionActions": ["specific change required before production"]
 }
 
 Apply these rules:
@@ -100,6 +139,11 @@ Apply these rules:
 - Flag medical diagnosis or treatment advice; the lesson must remain educational.
 - For practical work, flag missing PPE, biological-material handling, heat, glassware, chemical and disposal precautions.
 - Require a clear misconception check and at least one exam-style retrieval or application check.
+- Reject generic hooks, empty suspense, clickbait, decorative visuals and unsupported claims.
+- Check that the opening creates a genuine biological question and that the payoff resolves it.
+- Check that attention resets occur through learning actions rather than noise.
+- Audit every visual specification for scientific purpose, correct labels and relationships, suitable scale/abstraction and defensible animation order.
+- Confirm that diagnostic, guided-practice and exit questions align to the objectives and include usable mark logic.
 - Do not treat this automated pass as permission to publish. Human approval remains mandatory.
 
 Topic: ${strategy.topic}

@@ -1,29 +1,68 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
+const { evaluateBiologyScript } = require('../utils/biology-quality-gate');
 
 const SCRIPT_RESPONSE_SCHEMA = {
   type: 'object',
-  required: ['title', 'hook', 'sections', 'cta'],
+  required: ['title', 'hook', 'lessonPromise', 'diagnosticQuestion', 'sections', 'exitQuestion', 'cta'],
   properties: {
     title: { type: 'string' },
     hook: { type: 'string' },
+    lessonPromise: { type: 'string' },
+    diagnosticQuestion: { type: 'string' },
     sections: {
       type: 'array',
-      minItems: 5,
-      maxItems: 8,
+      minItems: 7,
+      maxItems: 10,
       items: {
         type: 'object',
-        required: ['title', 'content', 'duration'],
+        required: ['teachingBeat', 'title', 'content', 'visualSpec', 'retentionPurpose', 'duration'],
         properties: {
+          teachingBeat: {
+            type: 'string',
+            enum: ['diagnostic', 'phenomenon', 'model', 'guided_practice', 'misconception', 'exam_application', 'payoff', 'recap']
+          },
           title: { type: 'string' },
           content: {
             type: 'array',
             minItems: 1,
             items: { type: 'string' }
           },
+          visualSpec: {
+            type: 'object',
+            required: ['type', 'template', 'title', 'elements', 'relationships', 'animationSteps', 'accuracyChecks', 'modelLimitations'],
+            properties: {
+              type: {
+                type: 'string',
+                enum: ['labelled_diagram', 'process_flow', 'comparison', 'graph', 'data_table', 'practical_setup', 'exam_annotation', 'concept_map']
+              },
+              template: {
+                type: 'string',
+                enum: ['cell', 'membrane_transport', 'enzyme_reaction', 'molecule_model', 'plant_process', 'circulation', 'organ_system', 'inheritance', 'ecology', 'microorganism', 'practical_setup', 'data_visualization', 'exam_annotation', 'concept_map']
+              },
+              title: { type: 'string' },
+              elements: { type: 'array', minItems: 2, items: { type: 'string' } },
+              relationships: { type: 'array', items: { type: 'string' } },
+              animationSteps: { type: 'array', minItems: 2, items: { type: 'string' } },
+              accuracyChecks: { type: 'array', minItems: 1, items: { type: 'string' } },
+              modelLimitations: { type: 'array', minItems: 1, items: { type: 'string' } }
+            }
+          },
+          retentionPurpose: { type: 'string' },
           duration: { type: 'integer', minimum: 15, maximum: 180 }
         }
+      }
+    },
+    exitQuestion: {
+      type: 'object',
+      required: ['question', 'commandWord', 'marks', 'modelAnswer', 'markScheme'],
+      properties: {
+        question: { type: 'string' },
+        commandWord: { type: 'string' },
+        marks: { type: 'integer', minimum: 1, maximum: 10 },
+        modelAnswer: { type: 'string' },
+        markScheme: { type: 'array', minItems: 1, items: { type: 'string' } }
       }
     },
     cta: { type: 'string' }
@@ -142,13 +181,16 @@ class ScriptWriterAgent {
       ? `This is for ${CHANNEL_PROFILE.name} — ${CHANNEL_PROFILE.seriesName}.
 The audience is ${CHANNEL_PROFILE.audience}.
 Build the sections in this teaching sequence:
-1. precise learning objectives;
-2. prerequisite recall and clear definitions;
-3. step-by-step explanation using accepted secondary-school Biology;
-4. one concrete example, diagram description or data interpretation;
-5. a named common misconception and its correction;
-6. one exam-style application question followed by a concise model answer;
-7. practical-safety notes when laboratory work, specimens, heat, glassware or chemicals are involved.
+1. diagnostic retrieval question;
+2. surprising but defensible phenomenon, specimen, dataset, practical observation or exam problem;
+3. modelled explanation from observable evidence to mechanism to terminology;
+4. guided prediction or application;
+5. named misconception, why it feels plausible and the correction;
+6. exam application with command-word and mark-logic coaching;
+7. payoff that resolves the opening question, followed by an aligned exit question.
+Use the exact teachingBeat values diagnostic, phenomenon, model, guided_practice, misconception, exam_application and payoff at least once each.
+Every section must include a structured visualSpec. Select the closest topic-specific 3D template from cell, membrane_transport, enzyme_reaction, molecule_model, plant_process, circulation, organ_system, inheritance, ecology, microorganism, practical_setup, data_visualization, exam_annotation or concept_map. Its elements and relationships must be scientifically meaningful; animationSteps must progressively reveal an idea rather than decorate the screen; accuracyChecks must state what a human reviewer should verify; modelLimitations must explicitly identify simplification, omitted scale or other limits of the school-level model.
+Keep on-screen concepts concise but make content a complete spoken teaching script, not notes or placeholders. Create an attention reset every 45–90 seconds through prediction, contrast, diagram reveal, data reading, practical reasoning or exam decision.
 Use British English. Define specialist vocabulary before using it. Do not invent statistics, research, citations, personal experience or exam-board wording. Do not give medical diagnosis or treatment advice.`
       : '';
     const prompt = `You are writing a YouTube script plan.
@@ -156,9 +198,28 @@ Return only valid JSON with this exact shape:
 {
   "title": "compelling title under 100 characters",
   "hook": "opening hook in one sentence",
+  "lessonPromise": "specific learner payoff",
+  "diagnosticQuestion": "short prerequisite retrieval question",
   "sections": [
-    { "title": "section title", "content": ["spoken script bullet"], "duration": 60 }
+    {
+      "teachingBeat": "diagnostic|phenomenon|model|guided_practice|misconception|exam_application|payoff|recap",
+      "title": "section title",
+      "content": ["complete spoken-script beat"],
+      "visualSpec": {
+        "type": "labelled_diagram|process_flow|comparison|graph|data_table|practical_setup|exam_annotation|concept_map",
+        "template": "cell|membrane_transport|enzyme_reaction|molecule_model|plant_process|circulation|organ_system|inheritance|ecology|microorganism|practical_setup|data_visualization|exam_annotation|concept_map",
+        "title": "visual teaching title",
+        "elements": ["precise labelled element"],
+        "relationships": ["A causes or connects to B"],
+        "animationSteps": ["progressive reveal step"],
+        "accuracyChecks": ["specific scientific check"],
+        "modelLimitations": ["what is simplified, omitted or not to scale"]
+      },
+      "retentionPurpose": "how this beat renews attention while advancing learning",
+      "duration": 60
+    }
   ],
+  "exitQuestion": { "question": "aligned exam question", "commandWord": "explain", "marks": 3, "modelAnswer": "concise answer", "markScheme": ["one mark point"] },
   "cta": "clear call to action"
 }
 
@@ -180,8 +241,8 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
           ? '\nThis is a retry because the previous response was invalid. Return one complete JSON object only.'
           : '';
         const response = await this.aiTextService.generateText(prompt + retryInstruction, {
-          maxTokens: 4096,
-          temperature: 0.35,
+          maxTokens: 8192,
+          temperature: 0.25,
           retries: 2,
           responseMimeType: 'application/json',
           responseJsonSchema: SCRIPT_RESPONSE_SCHEMA
@@ -194,15 +255,18 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
         }
 
         this.logger.info(`Using AI script generation via ${this.aiTextService.providerName}`);
-        return {
+        const script = {
           title: String(parsed.title).slice(0, 100),
           hook: this.normalizeAIHook(parsed.hook),
+          lessonPromise: String(parsed.lessonPromise || strategy.lessonPromise || '').trim(),
+          diagnosticQuestion: String(parsed.diagnosticQuestion || '').trim(),
           introduction: await this.generateIntroduction(strategy),
           mainContent: {
             sections,
             totalDuration: this.calculateSectionsDuration(sections)
           },
           conclusion: await this.generateConclusion(strategy),
+          exitQuestion: parsed.exitQuestion,
           callToAction: this.normalizeAICTA(parsed.cta, strategy),
           duration: this.estimateDuration({ sections }),
           tone: template.tone,
@@ -215,6 +279,11 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
             generationSource: 'ai'
           }
         };
+        if (isBiologyMode()) {
+          const issues = evaluateBiologyScript(script);
+          if (issues.length > 0) throw new Error(`Script failed teaching-quality gate: ${issues.join(' ')}`);
+        }
+        return script;
       } catch (error) {
         lastError = error;
         if (attempt < 2) {
@@ -278,12 +347,31 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
 
         return {
           type: 'ai_generated',
+          teachingBeat: String(section.teachingBeat || '').trim(),
           title: String(section.title || `${strategy.topic} Part ${index + 1}`).trim(),
           content,
+          visualSpec: this.normalizeVisualSpec(section.visualSpec, section.title),
+          retentionPurpose: String(section.retentionPurpose || '').trim(),
           duration: parseInt(section.duration, 10) || 60
         };
       })
       .filter(section => section.title && section.content.length > 0);
+  }
+
+  normalizeVisualSpec(visualSpec = {}, fallbackTitle = 'Teaching visual') {
+    const normalize = value => Array.isArray(value)
+      ? value.map(item => String(item).trim()).filter(Boolean)
+      : [];
+    return {
+      type: String(visualSpec.type || '').trim(),
+      template: String(visualSpec.template || '').trim(),
+      title: String(visualSpec.title || fallbackTitle || 'Teaching visual').trim(),
+      elements: normalize(visualSpec.elements),
+      relationships: normalize(visualSpec.relationships),
+      animationSteps: normalize(visualSpec.animationSteps),
+      accuracyChecks: normalize(visualSpec.accuracyChecks),
+      modelLimitations: normalize(visualSpec.modelLimitations)
+    };
   }
 
   normalizeAICTA(cta, strategy) {
@@ -778,6 +866,9 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
     // Hook
     fullScript += `[${script.hook.duration}] HOOK\n`;
     fullScript += `${script.hook.text}\n\n`;
+
+    if (script.lessonPromise) fullScript += `LESSON PROMISE\n${script.lessonPromise}\n\n`;
+    if (script.diagnosticQuestion) fullScript += `DIAGNOSTIC QUESTION\n${script.diagnosticQuestion}\n\n`;
     
     // Introduction
     fullScript += `[${script.introduction.duration}] INTRODUCTION\n`;
@@ -820,6 +911,10 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
       if (section.visuals) {
         fullScript += `\n[VISUALS: ${section.visuals.join(', ')}]\n`;
       }
+      if (section.visualSpec) {
+        fullScript += `\n[3D VISUAL: ${section.visualSpec.template} — ${section.visualSpec.title}]\n`;
+        fullScript += `[MODEL LIMITS: ${section.visualSpec.modelLimitations.join('; ')}]\n`;
+      }
       
       fullScript += '\n';
     }
@@ -830,6 +925,13 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
       fullScript += `${line}\n`;
     });
     fullScript += `\n${script.conclusion.finalThought}\n\n`;
+
+    if (script.exitQuestion?.question) {
+      fullScript += `EXIT QUESTION (${script.exitQuestion.marks} marks)\n`;
+      fullScript += `${script.exitQuestion.question}\n`;
+      fullScript += `MODEL ANSWER: ${script.exitQuestion.modelAnswer}\n`;
+      fullScript += `MARK SCHEME: ${script.exitQuestion.markScheme.join('; ')}\n\n`;
+    }
     
     // Call to Action
     fullScript += `[${script.callToAction.duration}] CALL TO ACTION\n`;

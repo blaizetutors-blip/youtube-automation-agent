@@ -163,6 +163,14 @@ class ProductionManagementAgent {
     if (script.hook) {
       ttsText += `${script.hook.text}\n\n`;
     }
+
+    if (script.lessonPromise) {
+      ttsText += `${script.lessonPromise}\n\n`;
+    }
+
+    if (script.diagnosticQuestion) {
+      ttsText += `Before we begin, pause and answer this: ${script.diagnosticQuestion}\n\n`;
+    }
     
     // Add introduction
     if (script.introduction) {
@@ -171,7 +179,7 @@ class ProductionManagementAgent {
       ttsText += `${script.introduction.valueProposition}\n`;
       ttsText += `${script.introduction.credibility}\n\n`;
     }
-    
+
     // Add main content
     if (script.mainContent && script.mainContent.sections) {
       script.mainContent.sections.forEach((section, index) => {
@@ -198,6 +206,11 @@ class ProductionManagementAgent {
         
         ttsText += '\n';
       });
+    }
+
+    if (script.exitQuestion?.question) {
+      ttsText += `Now try this ${script.exitQuestion.marks || ''} mark question. ${script.exitQuestion.question}\n`;
+      ttsText += `Pause the video before the answer. Model answer: ${script.exitQuestion.modelAnswer}\n\n`;
     }
     
     // Add conclusion
@@ -361,6 +374,21 @@ class ProductionManagementAgent {
     
     try {
       const { strategy, script } = productionData;
+
+      if (isBiologyMode()) {
+        productionData.assets.video = {
+          visualAssets: [],
+          duration: productionData.estimatedDuration,
+          format: 'mp4',
+          resolution: '1920x1080',
+          fps: 30,
+          generatedWith: 'Local Three.js/WebGL Biology scene renderer',
+          visualSpecifications: (script.mainContent?.sections || []).map(section => section.visualSpec)
+        };
+        productionData.timeline.videoGenerated = new Date().toISOString();
+        this.logger.info('Prepared topic-specific 3D Biology scene specifications');
+        return [];
+      }
       
       // Generate visual assets using DALL-E
       const visualPrompts = this.createVisualPromptsFromScript(script);

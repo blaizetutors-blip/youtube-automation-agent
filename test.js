@@ -252,6 +252,73 @@ class SystemTest {
     };
   }
 
+  createValidBiologyStrategy() {
+    return {
+      topic: 'Cell structure and organisation',
+      angle: 'How cell structures cooperate to sustain life',
+      targetAudience: 'Secondary-school learners',
+      contentType: 'Explainer',
+      seriesFormat: 'CONCEPT LAB',
+      candidateAngles: [
+        'Compare plant and animal cells',
+        'Trace one cell function across organelles',
+        'Correct organelle misconceptions through an exam problem'
+      ],
+      selectionRationale: 'Tracing a function creates a causal story and supports exam application.',
+      coreQuestion: 'How do specialised structures allow a cell to function as a system?',
+      lessonPromise: 'By the end, learners can link each named cell structure to its function and justify the link.',
+      learningObjectives: ['Identify key structures', 'Explain structure-function links', 'Apply the model to an unfamiliar cell'],
+      prerequisiteKnowledge: ['Cells are the basic units of life', 'Living processes require matter and energy'],
+      misconceptions: ['The cell membrane is a solid wall; it is instead a selectively permeable boundary.'],
+      examFocus: {
+        commandWords: ['identify', 'explain'],
+        skills: ['structure-function reasoning'],
+        commonTraps: ['naming an organelle without linking it to the stated function']
+      },
+      retentionPlan: ['Opening prediction', '3D reveal', 'misconception decision', 'exam annotation'],
+      visualPlan: ['3D cell overview', 'membrane close-up', 'organelle comparison', 'process link', 'exam annotation'],
+      keywords: ['cell', 'organelle']
+    };
+  }
+
+  createValidBiologyAIResponse() {
+    const beats = ['diagnostic', 'phenomenon', 'model', 'guided_practice', 'misconception', 'exam_application', 'payoff'];
+    return {
+      title: 'How a Cell Works as One Organised System',
+      hook: 'A cell stays alive only when its specialised parts cooperate—so what fails first when one part stops?',
+      lessonPromise: 'You will be able to link cell structures to functions and earn explanation marks.',
+      diagnosticQuestion: 'What is the difference between a cell and a tissue?',
+      sections: beats.map((teachingBeat, index) => ({
+        teachingBeat,
+        title: `${teachingBeat.replace('_', ' ')} ${index + 1}`,
+        content: [
+          `This ${teachingBeat.replace('_', ' ')} beat develops an accurate structure-function link in the cell.`,
+          `Use the labelled model to predict what changes when component ${index + 1} is altered.`
+        ],
+        visualSpec: {
+          type: index === 5 ? 'exam_annotation' : 'labelled_diagram',
+          template: index === 5 ? 'exam_annotation' : 'cell',
+          title: `Cell structure model ${index + 1}`,
+          elements: ['cell membrane', 'nucleus', 'mitochondrion'],
+          relationships: ['Specialised structures support different cell functions.'],
+          animationSteps: ['Reveal the cell boundary', 'Add and connect the organelles'],
+          accuracyChecks: ['Confirm every structure-function link and spelling.'],
+          modelLimitations: ['Organelles are schematic and are not shown to scale.']
+        },
+        retentionPurpose: 'Requires a prediction before the explanation is revealed.',
+        duration: 55
+      })),
+      exitQuestion: {
+        question: 'Explain why a cell with many mitochondria may require more energy.',
+        commandWord: 'explain',
+        marks: 2,
+        modelAnswer: 'Mitochondria are the site of aerobic respiration, which releases energy for cell activities.',
+        markScheme: ['links mitochondria to aerobic respiration', 'links respiration to energy release']
+      },
+      cta: 'Try the exit question before watching the next Biology lesson.'
+    };
+  }
+
   async testPublishingSafety() {
     const { PublishingSchedulingAgent } = require('./agents/publishing-scheduling-agent');
     const agent = new PublishingSchedulingAgent({
@@ -547,13 +614,24 @@ class SystemTest {
             issues: [],
             claimsToVerify: [],
             curriculumChecks: ['Cell organisation covered.'],
-            practicalSafetyChecks: []
+            practicalSafetyChecks: [],
+            pedagogyChecks: ['Teaching sequence is coherent.'],
+            retentionChecks: ['Prediction advances the explanation.'],
+            visualAccuracyChecks: ['Model limitation is disclosed.'],
+            assessmentChecks: ['Exit task aligns to the lesson promise.'],
+            revisionActions: []
           };
         }
       };
+      const aiResponse = this.createValidBiologyAIResponse();
       const review = await reviewer.reviewScript(
-        { topic: 'Cell structure', angle: 'Organisation', targetAudience: 'Secondary learners' },
-        { fullScript: 'A cell contains organised structures.' }
+        this.createValidBiologyStrategy(),
+        {
+          ...aiResponse,
+          hook: { text: aiResponse.hook },
+          mainContent: { sections: aiResponse.sections },
+          fullScript: 'A complete, structured cell lesson.'
+        }
       );
       if (review.automatedVerdict !== 'pass') {
         throw new Error('Structured Biology review result was not accepted');
@@ -580,28 +658,13 @@ class SystemTest {
           if (scriptCalls === 1) {
             return '{"title":"Incomplete"';
           }
-          return JSON.stringify({
-            title: 'Cell Structure Explained',
-            hook: 'A cell is organised, not simply filled with parts.',
-            sections: Array.from({ length: 5 }, (_, index) => ({
-              title: `Section ${index + 1}`,
-              content: [`Accurate Biology explanation ${index + 1}.`],
-              duration: 60
-            })),
-            cta: 'Continue learning with Blaize Tutors.'
-          });
+          return JSON.stringify(this.createValidBiologyAIResponse());
         }
       };
 
-      const script = await writer.generateScriptWithAI({
-        topic: 'Cell structure and organisation',
-        contentType: 'Explainer',
-        angle: 'From organelles to organisation',
-        targetAudience: 'Secondary-school learners',
-        keywords: ['cell', 'organelle']
-      }, writer.templates.explainer);
+      const script = await writer.generateScriptWithAI(this.createValidBiologyStrategy(), writer.templates.explainer);
 
-      if (!script || scriptCalls !== 2 || script.mainContent.sections.length !== 5) {
+      if (!script || scriptCalls !== 2 || script.mainContent.sections.length !== 7) {
         throw new Error('Malformed Biology JSON was not retried and normalized');
       }
       if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
@@ -778,6 +841,23 @@ class SystemTest {
       }
       if (profile.BIOLOGY_TOPICS.length < 15) {
         throw new Error('Biology curriculum map is incomplete');
+      }
+      const { evaluateBiologyStrategy, evaluateBiologyScript } = require('./utils/biology-quality-gate');
+      const strategy = this.createValidBiologyStrategy();
+      const aiResponse = this.createValidBiologyAIResponse();
+      const script = { ...aiResponse, hook: { text: aiResponse.hook }, mainContent: { sections: aiResponse.sections } };
+      if (evaluateBiologyStrategy(strategy).length || evaluateBiologyScript(script).length) {
+        throw new Error('A complete Biology editorial package was rejected by the quality gate');
+      }
+      const genericScript = JSON.parse(JSON.stringify(script));
+      genericScript.mainContent.sections[0].content[0] = 'The shocking truth is game-changing.';
+      if (!evaluateBiologyScript(genericScript).some(issue => /Generic/.test(issue))) {
+        throw new Error('Generic clickbait language was not rejected');
+      }
+      const { Biology3DRenderer } = require('./utils/biology-3d-renderer');
+      const renderer = new Biology3DRenderer();
+      if (!renderer.createSceneHTML().includes('SCHEMATIC MODEL') || !renderer.threePath.endsWith('three.module.js')) {
+        throw new Error('Defensible 3D Biology renderer is not configured');
       }
     } finally {
       if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;

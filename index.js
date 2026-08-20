@@ -95,6 +95,8 @@ class YouTubeAutomationAgent {
 
   async logCapabilitySummary() {
     const { checkFFmpeg, ffmpegInstallHint } = require('./utils/ffmpeg');
+    const fsSync = require('fs');
+    const { chromium } = require('playwright');
     const creds = this.credentials.credentials || {};
 
     const hasText = this.credentials.hasAITextProvider();
@@ -107,12 +109,14 @@ class YouTubeAutomationAgent {
       hasGemini
     );
     const hasFFmpeg = await checkFFmpeg();
+    const has3D = fsSync.existsSync(chromium.executablePath());
     const hasUpload = Boolean(creds.youtube && this.credentials.tokens?.youtube);
 
     const capabilities = [
       { name: 'Script & strategy generation', ok: hasText, hint: 'configure an AI provider (npm run credentials:setup)' },
-      { name: 'Image generation (visuals/thumbnails)', ok: hasImages, hint: 'requires an OpenAI or Gemini image-capable tier — otherwise Blaize heritage slides are used' },
-      { name: 'Voice narration (TTS)', ok: hasTTS, hint: 'configure OpenAI, Gemini, ElevenLabs, or Azure Speech — otherwise videos are silent' },
+      { name: '3D Biology scenes (Three.js/WebGL)', ok: has3D, hint: 'run: npx playwright install chromium' },
+      { name: 'AI image generation (thumbnail supplement)', ok: hasImages, hint: 'optional — branded heritage thumbnails remain available' },
+      { name: 'Voice narration (TTS)', ok: hasTTS, hint: 'configure OpenAI, Gemini, ElevenLabs, or Azure Speech — missing narration blocks production' },
       { name: 'Video assembly (FFmpeg)', ok: hasFFmpeg, hint: ffmpegInstallHint() },
       { name: 'YouTube upload', ok: hasUpload, hint: 'run: npm run credentials:setup' }
     ];
@@ -315,7 +319,8 @@ class YouTubeAutomationAgent {
     // human approval is still required before upload scheduling.
     const review = await this.agents.contentReview.reviewScript(strategy, script);
     this.logger.info(`Automated Biology review: ${review.automatedVerdict}`);
-    if (review.automatedVerdict === 'block') {
+    const biologyReviewFailed = isBiologyMode() && review.automatedVerdict !== 'pass';
+    if (review.automatedVerdict === 'block' || biologyReviewFailed) {
       return {
         contentId: null,
         title: script.title,

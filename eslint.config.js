@@ -40,5 +40,20 @@ module.exports = [
     rules: {
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }]
     }
+  },
+  {
+    files: ['assets/3d/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        addEventListener: 'readonly',
+        devicePixelRatio: 'readonly',
+        document: 'readonly',
+        innerHeight: 'readonly',
+        innerWidth: 'readonly',
+        window: 'readonly'
+      }
+    }
   }
 ];

@@ -6,6 +6,7 @@ const { pathToFileURL } = require('url');
 const axios = require('axios');
 const { Logger } = require('./logger');
 const { runFFmpeg, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
+const { Biology3DRenderer } = require('./biology-3d-renderer');
 
 class AIVideoGenerator {
   constructor(credentials) {
@@ -376,6 +377,13 @@ class AIVideoGenerator {
     this.logger.info('Generating video from assets...');
     
     try {
+      const biologyMode = String(process.env.BLAIZE_BIOLOGY_MODE || '').toLowerCase() === 'true';
+      const use3D = String(process.env.BIOLOGY_3D_VISUALS || 'true').toLowerCase() !== 'false';
+      if (biologyMode) {
+        if (!use3D) throw new Error('Blaize Biology production requires BIOLOGY_3D_VISUALS=true');
+        return await this.generateBiology3DVideo(script, audioPath, outputPath);
+      }
+
       // Try Replicate for video generation first
       if (this.replicate && this.replicate.auth) {
         return await this.generateReplicateVideo(script, visualAssets, audioPath, outputPath);
@@ -386,6 +394,52 @@ class AIVideoGenerator {
     } catch (error) {
       this.logger.error('Video generation failed:', error);
       return await this.simulateVideoGeneration(script, visualAssets, audioPath, outputPath);
+    }
+  }
+
+  async generateBiology3DVideo(script, audioPath, outputPath) {
+    if (!(await checkFFmpeg())) throw new Error(ffmpegInstallHint());
+    if (!(await this.isUsableAudioFile(audioPath))) throw new Error('Narration is required before 3D rendering');
+
+    const sections = script.mainContent?.sections || [];
+    if (sections.length === 0 || sections.some(section => !section.visualSpec?.template)) {
+      throw new Error('The script is missing topic-specific 3D visual specifications');
+    }
+
+    const workDir = outputPath.replace(/\.mp4$/i, '_3d_work');
+    const clipsDir = path.join(workDir, 'clips');
+    const segmentsDir = path.join(workDir, 'segments');
+    const visualPath = outputPath.replace(/\.mp4$/i, '_3d_visual.mp4');
+    await fs.mkdir(segmentsDir, { recursive: true });
+
+    try {
+      const renderer = new Biology3DRenderer();
+      const clips = await renderer.renderSectionClips(sections, clipsDir, 5);
+      const segments = [];
+
+      for (let index = 0; index < clips.length; index++) {
+        const segmentPath = path.join(segmentsDir, `segment_${String(index).padStart(2, '0')}.mp4`);
+        await runFFmpeg([
+          '-y', '-stream_loop', '-1', '-i', clips[index].path,
+          '-t', String(clips[index].duration),
+          '-vf', 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,format=yuv420p',
+          '-r', '30', '-an', '-c:v', 'libx264', '-preset', 'veryfast', segmentPath
+        ]);
+        segments.push(segmentPath);
+      }
+
+      const concatPath = path.join(workDir, 'segments.txt');
+      const concatList = segments
+        .map(segment => `file '${segment.replace(/'/g, "'\\''")}'`)
+        .join('\n');
+      await fs.writeFile(concatPath, concatList);
+      await runFFmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', concatPath, '-c', 'copy', visualPath]);
+      await this.addAudioToVideo(visualPath, audioPath, outputPath);
+      this.logger.info('Topic-specific 3D Biology video assembly complete');
+      return outputPath;
+    } finally {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+      await fs.unlink(visualPath).catch(() => {});
     }
   }
 
