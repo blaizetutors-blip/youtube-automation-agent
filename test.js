@@ -573,6 +573,8 @@ class SystemTest {
     service.model = 'test-gemini';
     service.providerName = 'Test Gemini';
     service.sleep = async () => {};
+    let requestSlotCalls = 0;
+    service.waitForGeminiRequestSlot = async () => { requestSlotCalls++; };
 
     const retryResult = await service.generateText('Return JSON', {
       retries: 1,
@@ -580,8 +582,38 @@ class SystemTest {
       responseMimeType: 'application/json',
       responseJsonSchema: { type: 'object' }
     });
-    if (retryResult !== '{"ok":true}' || providerCalls !== 2) {
+    if (retryResult !== '{"ok":true}' || providerCalls !== 2 || requestSlotCalls !== 2) {
       throw new Error('Transient Gemini failure was not retried successfully');
+    }
+
+    const quotaError = new Error('429 RESOURCE_EXHAUSTED. Please retry in 19.65s.');
+    quotaError.status = 429;
+    const quotaDelay = service.getRetryDelayMs(quotaError, 0);
+    if (quotaDelay < 20000 || quotaDelay > 21000) {
+      throw new Error('Gemini RetryInfo delay was not honoured');
+    }
+
+    const previousGeminiLimit = process.env.GEMINI_REQUESTS_PER_MINUTE;
+    const originalDateNow = Date.now;
+    let fakeNow = 100000;
+    let pacingWaitMs = 0;
+    try {
+      process.env.GEMINI_REQUESTS_PER_MINUTE = '1';
+      Date.now = () => fakeNow;
+      const limiterService = new AITextService({});
+      limiterService.sleep = async milliseconds => {
+        pacingWaitMs += milliseconds;
+        fakeNow += milliseconds;
+      };
+      await limiterService.waitForGeminiRequestSlot('rate-limiter-test-model');
+      await limiterService.waitForGeminiRequestSlot('rate-limiter-test-model');
+    } finally {
+      Date.now = originalDateNow;
+      if (previousGeminiLimit === undefined) delete process.env.GEMINI_REQUESTS_PER_MINUTE;
+      else process.env.GEMINI_REQUESTS_PER_MINUTE = previousGeminiLimit;
+    }
+    if (pacingWaitMs < 60000) {
+      throw new Error('Gemini rolling request budget did not pace the next request');
     }
 
     const truncationService = new AITextService({});
@@ -594,6 +626,7 @@ class SystemTest {
       }
     };
     truncationService.model = 'test-gemini';
+    truncationService.waitForGeminiRequestSlot = async () => {};
     let truncationDetected = false;
     try {
       await truncationService.generateTextOnce('Return JSON', { maxTokens: 64 });
@@ -621,6 +654,7 @@ class SystemTest {
     };
     compatibilityService.model = 'test-gemini';
     compatibilityService.providerName = 'Test Gemini';
+    compatibilityService.waitForGeminiRequestSlot = async () => {};
     const compatibilityResult = await compatibilityService.generateTextOnce('Return JSON', {
       maxTokens: 12288,
       thinkingBudget: 0,
@@ -653,6 +687,24 @@ class SystemTest {
     }
     if (jsonOptions.responseMimeType !== 'application/json' || !jsonOptions.responseJsonSchema) {
       throw new Error('Structured JSON configuration was not enforced');
+    }
+
+    const quotaJsonService = new AITextService({});
+    let quotaJsonCalls = 0;
+    quotaJsonService.generateText = async () => {
+      quotaJsonCalls++;
+      const error = new Error('429 RESOURCE_EXHAUSTED');
+      error.status = 429;
+      throw error;
+    };
+    let quotaPropagated = false;
+    try {
+      await quotaJsonService.generateJson('Return JSON', { jsonRetries: 2 });
+    } catch (error) {
+      quotaPropagated = error.status === 429;
+    }
+    if (!quotaPropagated || quotaJsonCalls !== 1) {
+      throw new Error('Gemini quota exhaustion was misclassified as malformed JSON');
     }
 
     const reviewDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-review-'));

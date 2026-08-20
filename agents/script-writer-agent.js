@@ -368,6 +368,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
         }
         return script;
       } catch (error) {
+        if (this.aiTextService.isRetryableError?.(error)) throw error;
         lastError = error;
         validationFeedback = String(error.message || error).slice(0, 6000);
         if (attempt < 2) {
@@ -518,6 +519,7 @@ Use British English. Do not invent claims, statistics, research, syllabus wordin
         this.validateBiologyOutline(outline);
         return outline;
       } catch (error) {
+        if (this.aiTextService.isRetryableError?.(error)) throw error;
         lastError = error;
         feedback = String(error.message || error).slice(0, 3000);
         if (attempt < 2) this.logger.warn(`Biology lesson architecture was invalid; repairing: ${feedback}`);
@@ -586,6 +588,7 @@ Do not drift into a different lesson. Use British English and avoid fabricated c
         if (issues.length > 0) throw new Error(issues.join(' '));
         return section;
       } catch (error) {
+        if (this.aiTextService.isRetryableError?.(error)) throw error;
         lastError = error;
         feedback = String(error.message || error).slice(0, 3000);
         if (attempt < 2) {

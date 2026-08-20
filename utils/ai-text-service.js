@@ -1,6 +1,9 @@
 const OpenAI = require('openai');
 const { Logger } = require('./logger');
 
+const geminiRequestTimesByModel = new Map();
+const GEMINI_RATE_WINDOW_MS = 60000;
+
 const PROVIDERS = {
   openai: {
     name: 'OpenAI',
@@ -106,7 +109,7 @@ class AITextService {
           throw error;
         }
 
-        const delayMs = Math.min(8000, 1500 * (2 ** attempt));
+        const delayMs = this.getRetryDelayMs(error, attempt);
         this.logger.warn(
           `${this.providerName || 'AI provider'} is temporarily unavailable; ` +
           `retrying in ${delayMs / 1000}s (${attempt + 1}/${retries})`
@@ -135,6 +138,9 @@ class AITextService {
         return this.parseJsonResponse(response);
       } catch (error) {
         lastError = error;
+        if (this.isRetryableError(error)) {
+          throw error;
+        }
         if (attempt < jsonRetries) {
           this.logger.warn(
             `${this.providerName || 'AI provider'} returned unusable JSON; ` +
@@ -200,6 +206,7 @@ class AITextService {
       let lastError;
       for (let attempt = 0; attempt < compatibleConfigs.length; attempt++) {
         try {
+          await this.waitForGeminiRequestSlot(model);
           response = await this.gemini.models.generateContent({
             model,
             contents: prompt,
@@ -256,6 +263,48 @@ class AITextService {
 
     const message = String(error?.message || error || '');
     return /\b(?:429|500|502|503|504)\b|high demand|temporar(?:y|ily)|unavailable|resource exhausted|rate limit/i.test(message);
+  }
+
+  getRetryDelayMs(error, attempt = 0) {
+    const message = String(error?.message || error || '');
+    const providerDelay = message.match(/retry(?:Delay)?["'\s:]*([\d.]+)s/i) ||
+      message.match(/retry in ([\d.]+)s/i);
+    if (providerDelay) {
+      return Math.min(60000, Math.ceil(Number(providerDelay[1]) * 1000) + 750);
+    }
+    return Math.min(8000, 1500 * (2 ** attempt));
+  }
+
+  async waitForGeminiRequestSlot(model = this.model) {
+    const configuredLimit = Number.parseInt(process.env.GEMINI_REQUESTS_PER_MINUTE || '5', 10);
+    const requestsPerMinute = Number.isFinite(configuredLimit) && configuredLimit > 0
+      ? configuredLimit
+      : 5;
+    const key = String(model || 'default');
+    const timestamps = geminiRequestTimesByModel.get(key) || [];
+    let announcedWait = false;
+
+    while (true) {
+      const now = Date.now();
+      while (timestamps.length > 0 && now - timestamps[0] >= GEMINI_RATE_WINDOW_MS) {
+        timestamps.shift();
+      }
+      if (timestamps.length < requestsPerMinute) {
+        timestamps.push(now);
+        geminiRequestTimesByModel.set(key, timestamps);
+        return;
+      }
+
+      const waitMs = Math.max(250, GEMINI_RATE_WINDOW_MS - (now - timestamps[0]) + 750);
+      if (!announcedWait) {
+        this.logger.info(
+          `Gemini free-tier pacing active: waiting ${Math.ceil(waitMs / 1000)}s ` +
+          `before the next ${key} request (${requestsPerMinute} requests/minute)`
+        );
+        announcedWait = true;
+      }
+      await this.sleep(waitMs);
+    }
   }
 
   sleep(milliseconds) {
