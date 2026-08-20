@@ -738,54 +738,86 @@ class SystemTest {
       }
 
       const writer = new ScriptWriterAgent({ saveScript: async () => {} }, {});
+      writer.checkpointsPath = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-script-checkpoints-'));
+      const validResponse = this.createValidBiologyAIResponse();
+      const outline = {
+        title: validResponse.title,
+        hook: validResponse.hook,
+        lessonPromise: validResponse.lessonPromise,
+        diagnosticQuestion: validResponse.diagnosticQuestion,
+        sections: validResponse.sections.map(section => ({
+          teachingBeat: section.teachingBeat,
+          title: section.title,
+          purpose: `Develop the ${section.teachingBeat} stage of the driving question.`,
+          keyIdeas: ['Accurate structure-function relationship', 'Application to a new cell context'],
+          visualIntent: section.visualSpec.title,
+          retentionPurpose: section.retentionPurpose
+        })),
+        exitQuestion: validResponse.exitQuestion,
+        cta: validResponse.cta
+      };
       let scriptCalls = 0;
-      let structuredOptions;
+      let repairedModelSection = false;
       const scriptPrompts = [];
+      const structuredOptions = [];
       writer.aiTextService = {
         isAvailable: () => true,
         providerName: 'Test Gemini',
-        generateText: async (scriptPrompt, options) => {
+        generateJson: async (scriptPrompt, options) => {
           scriptCalls++;
           scriptPrompts.push(scriptPrompt);
-          structuredOptions = options;
-          if (scriptCalls === 1) {
-            const invalidDraft = this.createValidBiologyAIResponse();
-            invalidDraft.sections = invalidDraft.sections.map(section => ({
-              ...section,
-              content: section.content.slice(0, 1),
-              visualSpec: { ...section.visualSpec, modelLimitations: [] }
-            }));
-            return JSON.stringify(invalidDraft);
+          structuredOptions.push(options);
+          if (scriptPrompt.includes('seven-part lesson architecture')) return outline;
+
+          const sectionNumber = Number(scriptPrompt.match(/section (\d+) of/i)?.[1] || 1);
+          const source = validResponse.sections[sectionNumber - 1];
+          if (source.teachingBeat === 'model' && !repairedModelSection) {
+            repairedModelSection = true;
+            return {
+              ...source,
+              content: source.content.slice(0, 1),
+              visualSpec: { ...source.visualSpec, modelLimitations: [] }
+            };
           }
-          return JSON.stringify(this.createValidBiologyAIResponse());
+          return source;
         }
       };
 
-      const script = await writer.generateScriptWithAI(this.createValidBiologyStrategy(), writer.templates.explainer);
+      const biologyStrategy = this.createValidBiologyStrategy();
+      const script = await writer.generateScriptWithAI(biologyStrategy, writer.templates.explainer);
 
-      if (!script || scriptCalls !== 2 || script.mainContent.sections.length !== 7) {
-        throw new Error('Biology quality-gate failure was not repaired and normalized');
+      if (!script || scriptCalls !== 9 || script.mainContent.sections.length !== 7) {
+        throw new Error('Staged Biology script was not generated and repaired section by section');
       }
-      if (structuredOptions.responseMimeType !== 'application/json' || !structuredOptions.responseJsonSchema) {
-        throw new Error('Script writer did not request schema-constrained JSON');
-      }
-      if (structuredOptions.thinkingBudget !== 0 || structuredOptions.maxTokens < 8192) {
-        throw new Error('Script writer did not request a resilient Gemini output budget');
+      if (structuredOptions.some(options => options.thinkingBudget !== 0 || !options.responseJsonSchema)) {
+        throw new Error('Staged script writer did not request schema-constrained Gemini JSON');
       }
       if (
         !scriptPrompts[0].includes('Driving question:') ||
-        !scriptPrompts[0].includes('Misconceptions to diagnose and correct:') ||
+        !scriptPrompts[0].includes('Misconceptions:') ||
         !scriptPrompts[0].includes('Instructional visual plan:')
       ) {
-        throw new Error('Script writer did not receive the complete Biology strategy blueprint');
+        throw new Error('Staged script writer did not receive the complete Biology strategy blueprint');
       }
       if (
-        !scriptPrompts[1].includes('previous response failed validation because') ||
-        !scriptPrompts[1].includes('needs at least two substantive spoken-script beats') ||
-        !scriptPrompts[1].includes("does not disclose the model's limitations or scale")
+        !scriptPrompts.some(prompt => prompt.includes('previous section failed validation')) ||
+        !scriptPrompts.some(prompt => prompt.includes('needs at least two substantive spoken-script beats')) ||
+        !scriptPrompts.some(prompt => prompt.includes("does not disclose the model's limitations or scale"))
       ) {
-        throw new Error('Script repair request did not include actionable validation feedback');
+        throw new Error('Targeted section repair did not include actionable validation feedback');
       }
+
+      const callsBeforeResume = scriptCalls;
+      const refreshedStrategy = { ...biologyStrategy, angle: 'A differently worded retry angle' };
+      const resumedScript = await writer.generateScriptWithAI(refreshedStrategy, writer.templates.explainer);
+      if (
+        !resumedScript || scriptCalls !== callsBeforeResume ||
+        resumedScript.metadata.generationSource !== 'staged_ai' ||
+        resumedScript.metadata.strategy.angle !== biologyStrategy.angle
+      ) {
+        throw new Error('Validated Biology script checkpoint was not resumed without repeat AI calls');
+      }
+      await fs.rm(writer.checkpointsPath, { recursive: true, force: true });
     } finally {
       if (previousMode === undefined) delete process.env.BLAIZE_BIOLOGY_MODE;
       else process.env.BLAIZE_BIOLOGY_MODE = previousMode;

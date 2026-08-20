@@ -59,24 +59,35 @@ function evaluateBiologyScript(script = {}) {
     issues.push('The exit assessment needs a mark scheme.');
   }
 
-  sections.forEach((section, index) => {
-    const label = section.title || `Section ${index + 1}`;
-    if (!nonEmptyArray(section.content, 2)) issues.push(`${label} needs at least two substantive spoken-script beats.`);
-    if (!String(section.retentionPurpose || '').trim()) issues.push(`${label} has no retention purpose.`);
-    const visual = section.visualSpec;
-    if (!visual || !String(visual.type || '').trim()) {
-      issues.push(`${label} has no instructional visual specification.`);
-      return;
-    }
-    if (!String(visual.template || '').trim()) issues.push(`${label} has no topic-specific 3D scene template.`);
-    if (!nonEmptyArray(visual.elements, 2)) issues.push(`${label} visual needs at least two labelled elements.`);
-    if (!nonEmptyArray(visual.animationSteps, 2)) issues.push(`${label} visual needs progressive reveal or animation steps.`);
-    if (!nonEmptyArray(visual.accuracyChecks, 1)) issues.push(`${label} visual has no scientific accuracy check.`);
-    if (!nonEmptyArray(visual.modelLimitations, 1)) issues.push(`${label} visual does not disclose the model's limitations or scale.`);
-  });
+  sections.forEach((section, index) => issues.push(...evaluateBiologySection(section, index)));
 
   for (const pattern of GENERIC_CONTENT_PATTERNS) {
     if (pattern.test(serialized)) issues.push(`Generic or placeholder language detected: ${pattern.source}.`);
+  }
+  return issues;
+}
+
+function evaluateBiologySection(section = {}, index = 0) {
+  const issues = [];
+  const label = section.title || `Section ${index + 1}`;
+  if (!REQUIRED_TEACHING_BEATS.includes(section.teachingBeat)) {
+    issues.push(`${label} has an invalid teaching beat.`);
+  }
+  if (!nonEmptyArray(section.content, 2)) issues.push(`${label} needs at least two substantive spoken-script beats.`);
+  if (!String(section.retentionPurpose || '').trim()) issues.push(`${label} has no retention purpose.`);
+  const visual = section.visualSpec;
+  if (!visual || !String(visual.type || '').trim()) {
+    issues.push(`${label} has no instructional visual specification.`);
+    return issues;
+  }
+  if (!String(visual.template || '').trim()) issues.push(`${label} has no topic-specific 3D scene template.`);
+  if (!nonEmptyArray(visual.elements, 2)) issues.push(`${label} visual needs at least two labelled elements.`);
+  if (!nonEmptyArray(visual.animationSteps, 2)) issues.push(`${label} visual needs progressive reveal or animation steps.`);
+  if (!nonEmptyArray(visual.accuracyChecks, 1)) issues.push(`${label} visual has no scientific accuracy check.`);
+  if (!nonEmptyArray(visual.modelLimitations, 1)) issues.push(`${label} visual does not disclose the model's limitations or scale.`);
+  const serialized = JSON.stringify(section);
+  for (const pattern of GENERIC_CONTENT_PATTERNS) {
+    if (pattern.test(serialized)) issues.push(`${label} contains generic or placeholder language: ${pattern.source}.`);
   }
   return issues;
 }
@@ -85,5 +96,6 @@ module.exports = {
   REQUIRED_TEACHING_BEATS,
   GENERIC_CONTENT_PATTERNS,
   evaluateBiologyStrategy,
+  evaluateBiologySection,
   evaluateBiologyScript
 };

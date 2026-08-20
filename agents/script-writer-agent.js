@@ -1,7 +1,14 @@
+const fs = require('fs').promises;
+const path = require('path');
+const crypto = require('crypto');
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 const { CHANNEL_PROFILE, isBiologyMode } = require('../config/blaize-biology');
-const { evaluateBiologyScript } = require('../utils/biology-quality-gate');
+const {
+  REQUIRED_TEACHING_BEATS,
+  evaluateBiologySection,
+  evaluateBiologyScript
+} = require('../utils/biology-quality-gate');
 
 const SCRIPT_RESPONSE_SCHEMA = {
   type: 'object',
@@ -70,12 +77,65 @@ const SCRIPT_RESPONSE_SCHEMA = {
   }
 };
 
+const BIOLOGY_OUTLINE_SCHEMA = {
+  type: 'object',
+  required: ['title', 'hook', 'lessonPromise', 'diagnosticQuestion', 'sections', 'exitQuestion', 'cta'],
+  properties: {
+    title: { type: 'string' },
+    hook: { type: 'string' },
+    lessonPromise: { type: 'string' },
+    diagnosticQuestion: { type: 'string' },
+    sections: {
+      type: 'array',
+      minItems: 7,
+      maxItems: 7,
+      items: {
+        type: 'object',
+        required: ['teachingBeat', 'title', 'purpose', 'keyIdeas', 'visualIntent', 'retentionPurpose'],
+        properties: {
+          teachingBeat: { type: 'string', enum: REQUIRED_TEACHING_BEATS },
+          title: { type: 'string' },
+          purpose: { type: 'string' },
+          keyIdeas: { type: 'array', minItems: 2, items: { type: 'string' } },
+          visualIntent: { type: 'string' },
+          retentionPurpose: { type: 'string' }
+        }
+      }
+    },
+    exitQuestion: {
+      type: 'object',
+      required: ['question', 'commandWord', 'marks', 'modelAnswer', 'markScheme'],
+      properties: {
+        question: { type: 'string' },
+        commandWord: { type: 'string' },
+        marks: { type: 'integer', minimum: 1, maximum: 10 },
+        modelAnswer: { type: 'string' },
+        markScheme: { type: 'array', minItems: 1, items: { type: 'string' } }
+      }
+    },
+    cta: { type: 'string' }
+  }
+};
+
+const BIOLOGY_SECTION_SCHEMA = {
+  type: 'object',
+  required: ['title', 'content', 'visualSpec', 'retentionPurpose', 'duration'],
+  properties: {
+    title: { type: 'string' },
+    content: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'string' } },
+    visualSpec: SCRIPT_RESPONSE_SCHEMA.properties.sections.items.properties.visualSpec,
+    retentionPurpose: { type: 'string' },
+    duration: { type: 'integer', minimum: 45, maximum: 120 }
+  }
+};
+
 class ScriptWriterAgent {
   constructor(db, credentials) {
     this.db = db;
     this.credentials = credentials;
     this.logger = new Logger('ScriptWriter');
     this.templates = this.loadTemplates();
+    this.checkpointsPath = path.join(process.cwd(), 'data', 'script-checkpoints');
     this.aiTextService = new AITextService(credentials?.credentials || credentials || {});
   }
 
@@ -176,6 +236,10 @@ class ScriptWriterAgent {
     if (!this.aiTextService.isAvailable()) {
       this.logger.info('Using template script generation because no AI text provider is configured');
       return null;
+    }
+
+    if (isBiologyMode()) {
+      return this.generateBiologyScriptInStages(strategy, template);
     }
 
     const biologyRequirements = isBiologyMode()
@@ -320,6 +384,256 @@ Avoid fabricated statistics, unsupported claims, and fake urgency.`;
 
     this.logger.warn(`AI script generation failed; using template fallback: ${lastError.message}`);
     return null;
+  }
+
+  buildBiologyStrategyContext(strategy) {
+    return `Topic: ${strategy.topic}
+Selected angle: ${strategy.angle}
+Audience: ${strategy.targetAudience}
+Driving question: ${strategy.coreQuestion}
+Lesson promise: ${strategy.lessonPromise}
+Learning objectives: ${JSON.stringify(strategy.learningObjectives || [])}
+Prerequisite knowledge: ${JSON.stringify(strategy.prerequisiteKnowledge || [])}
+Misconceptions: ${JSON.stringify(strategy.misconceptions || [])}
+Exam command words: ${JSON.stringify(strategy.examFocus?.commandWords || [])}
+Exam skills: ${JSON.stringify(strategy.examFocus?.skills || [])}
+Common exam traps: ${JSON.stringify(strategy.examFocus?.commonTraps || [])}
+Retention plan: ${JSON.stringify(strategy.retentionPlan || [])}
+Instructional visual plan: ${JSON.stringify(strategy.visualPlan || [])}`;
+  }
+
+  async generateBiologyScriptInStages(strategy, template) {
+    const fingerprint = this.getStrategyFingerprint(strategy);
+    const checkpoint = await this.loadScriptCheckpoint(fingerprint);
+    const effectiveStrategy = checkpoint.strategy || strategy;
+    checkpoint.strategy = effectiveStrategy;
+    let outline = checkpoint.outline;
+
+    try {
+      if (outline) this.validateBiologyOutline(outline);
+    } catch (error) {
+      this.logger.warn(`Discarding invalid script outline checkpoint: ${error.message}`);
+      outline = null;
+      checkpoint.outline = null;
+      checkpoint.sections = [];
+    }
+
+    if (!outline) {
+      this.logger.info('Building the seven-part Biology lesson architecture...');
+      outline = await this.generateBiologyOutline(effectiveStrategy);
+      checkpoint.outline = outline;
+      checkpoint.sections = [];
+      await this.saveScriptCheckpoint(fingerprint, checkpoint);
+    } else {
+      this.logger.info('Resuming from the validated Biology lesson architecture checkpoint');
+    }
+
+    const sections = [];
+    for (let index = 0; index < outline.sections.length; index++) {
+      const plan = outline.sections[index];
+      let section = checkpoint.sections?.[index];
+      const savedIssues = section && section.teachingBeat === plan.teachingBeat
+        ? evaluateBiologySection(section, index)
+        : ['Checkpoint section does not match the lesson architecture.'];
+
+      if (!section || savedIssues.length > 0) {
+        this.logger.info(
+          `Writing validated Biology section ${index + 1}/${outline.sections.length}: ${plan.teachingBeat}`
+        );
+        section = await this.generateBiologySection(effectiveStrategy, outline, plan, index, sections[index - 1]);
+        checkpoint.sections[index] = section;
+        await this.saveScriptCheckpoint(fingerprint, checkpoint);
+      } else {
+        this.logger.info(
+          `Resumed validated Biology section ${index + 1}/${outline.sections.length}: ${plan.teachingBeat}`
+        );
+      }
+      sections.push(section);
+    }
+
+    const script = {
+      title: String(outline.title).trim().slice(0, 100),
+      hook: this.normalizeAIHook(outline.hook),
+      lessonPromise: String(outline.lessonPromise || effectiveStrategy.lessonPromise || '').trim(),
+      diagnosticQuestion: String(outline.diagnosticQuestion || '').trim(),
+      introduction: await this.generateIntroduction(effectiveStrategy),
+      mainContent: {
+        sections,
+        totalDuration: this.calculateSectionsDuration(sections)
+      },
+      conclusion: await this.generateConclusion(effectiveStrategy),
+      exitQuestion: outline.exitQuestion,
+      callToAction: this.normalizeAICTA(outline.cta, effectiveStrategy),
+      duration: this.estimateDuration({ sections }),
+      tone: template.tone,
+      pacing: template.pacing,
+      keywords: effectiveStrategy.keywords || [],
+      metadata: {
+        strategy: effectiveStrategy,
+        generatedAt: new Date().toISOString(),
+        version: '1.1',
+        generationSource: 'staged_ai',
+        checkpoint: fingerprint
+      }
+    };
+
+    const issues = evaluateBiologyScript(script);
+    if (issues.length > 0) {
+      throw new Error(`Staged script failed final teaching-quality gate: ${issues.join(' ')}`);
+    }
+
+    checkpoint.completed = true;
+    await this.saveScriptCheckpoint(fingerprint, checkpoint);
+    this.logger.info(`Using staged AI script generation via ${this.aiTextService.providerName}`);
+    return script;
+  }
+
+  async generateBiologyOutline(strategy) {
+    const prompt = `Act as a senior secondary Biology teacher, examiner and visual lesson director.
+Design a coherent seven-part lesson architecture before any narration is written.
+Use exactly these teaching beats once each and in this order: ${REQUIRED_TEACHING_BEATS.join(', ')}.
+Every section must advance the same driving question; do not replace the requested lesson with a loosely related topic.
+Sequence from retrieval to phenomenon, model, guided application, misconception repair, exam transfer and payoff.
+Return JSON only. Each section needs teachingBeat, title, purpose, at least two keyIdeas, visualIntent and retentionPurpose.
+The exitQuestion must assess the stated objectives and include commandWord, marks, modelAnswer and markScheme.
+
+${this.buildBiologyStrategyContext(strategy)}
+Use British English. Do not invent claims, statistics, research, syllabus wording or exam-board quotations.`;
+
+    let lastError;
+    let feedback = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const outline = await this.aiTextService.generateJson(
+          prompt + (feedback ? `\nCorrect these architecture defects: ${feedback}` : ''),
+          {
+            maxTokens: 4096,
+            temperature: 1,
+            thinkingBudget: 0,
+            retries: 2,
+            jsonRetries: 1,
+            responseJsonSchema: BIOLOGY_OUTLINE_SCHEMA
+          }
+        );
+        this.validateBiologyOutline(outline);
+        return outline;
+      } catch (error) {
+        lastError = error;
+        feedback = String(error.message || error).slice(0, 3000);
+        if (attempt < 2) this.logger.warn(`Biology lesson architecture was invalid; repairing: ${feedback}`);
+      }
+    }
+    throw new Error(`Biology lesson architecture failed after repair: ${lastError.message}`);
+  }
+
+  validateBiologyOutline(outline) {
+    if (!outline?.title || !outline?.hook || !outline?.lessonPromise || !outline?.diagnosticQuestion) {
+      throw new Error('The lesson architecture is missing its title, hook, promise or diagnostic question.');
+    }
+    if (!outline.exitQuestion?.question || !outline.exitQuestion?.modelAnswer || !outline.exitQuestion?.markScheme?.length) {
+      throw new Error('The lesson architecture has an incomplete exit assessment.');
+    }
+    if (!Array.isArray(outline.sections) || outline.sections.length !== REQUIRED_TEACHING_BEATS.length) {
+      throw new Error(`The lesson architecture must contain exactly ${REQUIRED_TEACHING_BEATS.length} sections.`);
+    }
+    outline.sections.forEach((section, index) => {
+      if (section.teachingBeat !== REQUIRED_TEACHING_BEATS[index]) {
+        throw new Error(`Section ${index + 1} must use the ${REQUIRED_TEACHING_BEATS[index]} teaching beat.`);
+      }
+      if (!section.title || !section.purpose || !section.retentionPurpose || !section.visualIntent) {
+        throw new Error(`Section ${index + 1} is missing a title, purpose, retention purpose or visual intent.`);
+      }
+      if (!Array.isArray(section.keyIdeas) || section.keyIdeas.filter(Boolean).length < 2) {
+        throw new Error(`Section ${index + 1} needs at least two precise biological ideas.`);
+      }
+    });
+  }
+
+  async generateBiologySection(strategy, outline, plan, index, previousSection = null) {
+    const prompt = `Write one finished spoken section of a rigorous secondary Biology video.
+This is section ${index + 1} of ${outline.sections.length}; its fixed teaching beat is ${plan.teachingBeat}.
+Return JSON only with title, content, visualSpec, retentionPurpose and duration.
+The content array must contain 2–4 complete spoken paragraphs of roughly 55–90 words each, not notes or visual directions.
+Explain from evidence or observation to mechanism to precise terminology. Include a purposeful learner prediction, decision or check where appropriate.
+The visualSpec must contain type, template, title, at least two labelled elements, relationships, at least two progressive animationSteps, at least one accuracyChecks entry and at least one modelLimitations entry. State what is schematic, omitted, exaggerated or not to scale.
+Use only these visual templates: cell, membrane_transport, enzyme_reaction, molecule_model, plant_process, circulation, organ_system, inheritance, ecology, microorganism, practical_setup, data_visualization, exam_annotation, concept_map.
+
+${this.buildBiologyStrategyContext(strategy)}
+Lesson title: ${outline.title}
+Section plan: ${JSON.stringify(plan)}
+Previous section for continuity: ${previousSection ? JSON.stringify({ title: previousSection.title, teachingBeat: previousSection.teachingBeat }) : 'none'}
+Do not drift into a different lesson. Use British English and avoid fabricated claims, citations, statistics, personal experience or exam-board wording.`;
+
+    let lastError;
+    let feedback = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const parsed = await this.aiTextService.generateJson(
+          prompt + (feedback ? `\nThe previous section failed validation. Correct every defect: ${feedback}` : ''),
+          {
+            maxTokens: 3072,
+            temperature: 1,
+            thinkingBudget: 0,
+            retries: 2,
+            jsonRetries: 1,
+            responseJsonSchema: BIOLOGY_SECTION_SCHEMA
+          }
+        );
+        const section = this.normalizeAISections([
+          { ...parsed, teachingBeat: plan.teachingBeat }
+        ], strategy)[0];
+        const issues = evaluateBiologySection(section, index);
+        if (issues.length > 0) throw new Error(issues.join(' '));
+        return section;
+      } catch (error) {
+        lastError = error;
+        feedback = String(error.message || error).slice(0, 3000);
+        if (attempt < 2) {
+          this.logger.warn(`Biology section ${index + 1} failed its quality gate; repairing: ${feedback}`);
+        }
+      }
+    }
+    throw new Error(`Biology section ${index + 1} failed after targeted repair: ${lastError.message}`);
+  }
+
+  getStrategyFingerprint(strategy) {
+    const checkpointScope = {
+      topic: String(strategy.topic || '').trim().toLowerCase(),
+      contentType: String(strategy.contentType || '').trim().toLowerCase(),
+      seriesFormat: String(strategy.seriesFormat || '').trim().toLowerCase(),
+      day: new Date().toISOString().slice(0, 10),
+      pipelineVersion: 1
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(checkpointScope)).digest('hex').slice(0, 20);
+  }
+
+  async loadScriptCheckpoint(fingerprint) {
+    const filePath = path.join(this.checkpointsPath, `${fingerprint}.json`);
+    try {
+      const checkpoint = JSON.parse(await fs.readFile(filePath, 'utf8'));
+      if (checkpoint.version === 1 && checkpoint.fingerprint === fingerprint) return checkpoint;
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+        this.logger.warn(`Unable to read script checkpoint: ${error.message}`);
+      }
+    }
+    return {
+      version: 1,
+      fingerprint,
+      outline: null,
+      sections: [],
+      completed: false,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  async saveScriptCheckpoint(fingerprint, checkpoint) {
+    await fs.mkdir(this.checkpointsPath, { recursive: true });
+    const filePath = path.join(this.checkpointsPath, `${fingerprint}.json`);
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    const payload = { ...checkpoint, updatedAt: new Date().toISOString() };
+    await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), 'utf8');
+    await fs.rename(tempPath, filePath);
   }
 
   parseAIJsonResponse(response) {
